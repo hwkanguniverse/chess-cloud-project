@@ -7,6 +7,9 @@ set -uo pipefail
 REGION="ap-southeast-1"
 FAIL=0
 
+# Runnable from any directory, including a terraform/ subdir mid-workflow.
+cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+
 flag() { echo "  DRIFT: $1"; FAIL=1; }
 ok()   { echo "  ok: $1"; }
 
@@ -70,6 +73,33 @@ FC=$(aws budgets describe-notifications-for-budget \
   --account-id "$ACCT" --budget-name "$BUDGET" \
   --query "length(Notifications[?NotificationType=='FORECASTED'])" --output text 2>/dev/null || echo 0)
 [ "$FC" != "0" ] && ok "forecast alert set" || flag "no FORECASTED alert - you learn about overspend after the fact"
+
+# The DLQ must exist and be wired up. A queue whose redrive policy is missing
+# looks identical to a working one until a poison message arrives.
+echo "SQS dead letter queue:"
+QURL=$(aws sqs get-queue-url --queue-name chess-cloud-analysis --region "$REGION" \
+  --query QueueUrl --output text 2>/dev/null)
+if [ -z "$QURL" ] || [ "$QURL" = "None" ]; then
+  ok "queue not created yet"
+else
+  RD=$(aws sqs get-queue-attributes --queue-url "$QURL" --region "$REGION" \
+    --attribute-names RedrivePolicy --query 'Attributes.RedrivePolicy' --output text 2>/dev/null)
+  case "$RD" in
+    *deadLetterTargetArn*) ok "redrive policy set" ;;
+    *)                     flag "main queue has no redrive policy - failures would retry forever" ;;
+  esac
+
+  # Messages here mean games failed every retry. Not drift, but nothing else
+  # surfaces it and an unnoticed DLQ is the same as no DLQ.
+  DURL=$(aws sqs get-queue-url --queue-name chess-cloud-analysis-dlq --region "$REGION" \
+    --query QueueUrl --output text 2>/dev/null)
+  if [ -n "$DURL" ] && [ "$DURL" != "None" ]; then
+    N=$(aws sqs get-queue-attributes --queue-url "$DURL" --region "$REGION" \
+      --attribute-names ApproximateNumberOfMessages \
+      --query 'Attributes.ApproximateNumberOfMessages' --output text 2>/dev/null)
+    [ "$N" = "0" ] && ok "dlq empty" || echo "  NOTE: $N message(s) in the DLQ - inspect, these failed every retry"
+  fi
+fi
 
 echo
 [ "$FAIL" = "0" ] && echo "No drift." || echo "Drift found - reconcile with the skill or log it in CLAUDE.md."

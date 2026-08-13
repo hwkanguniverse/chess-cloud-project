@@ -74,6 +74,8 @@ Fill in as decisions are made. Format: what was chosen, what was rejected, and w
 | Game lookup | Composite id — the id *is* the key | GSI on `gameId`; `PK = GAME#<gameId>` | DynamoDB computes an item's location from the partition key rather than searching, so a bare `gameId` would force a Scan. A GSI is eventually consistent — a poll right after submit could 404 on a game that exists — and roughly doubles write cost. `PK = GAME#` would break listing a user's games. |
 | Id delimiter | `-` (`hikaru-1723526400-abc123`) | `.`; `#`; base64url | Conventional in URLs. In a URL path everything after `#` is a fragment and never reaches the server. Base64 is encoding, not encryption — one command decodes it — so it buys no privacy while making logs harder to read. Stored keys still use `#`. |
 | Id parsing | `rsplit("-", 2)` + hyphen-free gameIds | `split("-")` | Chess.com usernames may contain hyphens, so splitting left-to-right mis-parses `a-b_c1-...` into four parts and rebuilds the wrong key. Splitting from the right takes the last two fields — timestamp and gameId — and leaves the username whole. Requires gameIds with no hyphens: use `uuid4().hex`, not `str(uuid4())`. |
+| Visibility timeout | 180s | 60s tuned to the fake worker | Sized for real analysis (30–90s/game) so the value never changes underneath us. Too short means a second worker starts a game the first is still analysing; too long means a crashed worker's message waits before retry. 3min of dead time is invisible at this scale. |
+| Max receives | 3 | 5; 2 | Rides out a transient crash or Spot reclaim, but quarantines a genuinely poison game fast — each retry costs a full analysis attempt in Fargate time, which is the thing actually billed. |
 | _(next)_ | | | |
 
 ---
@@ -145,8 +147,15 @@ Settle the keys **before** the table exists. A wrong partition key means a data 
 
 The DLQ catches messages that fail repeatedly, so one bad game cannot block the queue forever.
 
-- [ ] Queue and DLQ created together — retrofitting a DLQ after a poison message is worse.
-- [ ] Decide the visibility timeout: how long a message is hidden while being worked on. Too short and a slow job gets processed twice; too long and a crashed worker's message is stuck.
+- [x] Queue and DLQ created together — retrofitting a DLQ after a poison message is worse.
+- [x] **Visibility timeout: 180s.** Sized for real Stockfish analysis (30–90s/game), not the 10s fake worker, so it never needs revisiting when the engine lands.
+- [x] **Max receives: 3** before redrive to the DLQ.
+- [x] **Long polling (20s).** The default of 0 is short polling — the worker asks, gets an instant "no", and asks again in a tight loop, burning CPU and API calls while idle.
+- [x] Redrive proven on the live queue: receive counts climbed 1 → 2 → 3, the message vanished from the main queue on the 4th attempt, and arrived in the DLQ with its body intact.
+
+**Learned while testing:** `ApproximateNumberOfMessages` lags — it reported 1 for an already-empty DLQ until a long poll confirmed 0. Queue depth is *approximate*, which matters later since depth is the autoscaling signal.
+
+**Correction:** `redrive_allow_policy` restricts which queues may redrive *into* the DLQ. It does **not** block a direct `SendMessage` — that succeeded in testing. Keeping redrive the only real path into the DLQ is an IAM job, handled when the Lambda and worker roles are scoped.
 
 ## Lambda + API Gateway — the front door
 
