@@ -153,7 +153,9 @@ The DLQ catches messages that fail repeatedly, so one bad game cannot block the 
 - [x] **Long polling (20s).** The default of 0 is short polling — the worker asks, gets an instant "no", and asks again in a tight loop, burning CPU and API calls while idle.
 - [x] Redrive proven on the live queue: receive counts climbed 1 → 2 → 3, the message vanished from the main queue on the 4th attempt, and arrived in the DLQ with its body intact.
 
-**Learned while testing:** `ApproximateNumberOfMessages` lags — it reported 1 for an already-empty DLQ until a long poll confirmed 0. Queue depth is *approximate*, which matters later since depth is the autoscaling signal.
+**Learned while testing:** `ApproximateNumberOfMessages` lags in *both* directions — observed reporting 1 for an already-empty DLQ, and 0 for a DLQ that held a message. `check-drift.sh` therefore polls the DLQ rather than reading the counter: a check that reports "all clear" when it is not is worse than a slow one. Costs a few seconds per run; it never deletes, and receives at visibility 0 so anything found stays available to the real worker.
+
+Queue depth being approximate is fine for autoscaling — cooldowns absorb it — but not for a correctness check. A CloudWatch alarm on DLQ depth is the proper push-based answer and belongs in Phase 4 with the rest of the alarms.
 
 **Correction:** `redrive_allow_policy` restricts which queues may redrive *into* the DLQ. It does **not** block a direct `SendMessage` — that succeeded in testing. Keeping redrive the only real path into the DLQ is an IAM job, handled when the Lambda and worker roles are scoped.
 

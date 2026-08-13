@@ -91,13 +91,25 @@ else
 
   # Messages here mean games failed every retry. Not drift, but nothing else
   # surfaces it and an unnoticed DLQ is the same as no DLQ.
+  #
+  # This polls rather than reading ApproximateNumberOfMessages, which lags -
+  # observed reporting 0 for a DLQ that held a message, and 1 for one already
+  # empty. A check that reports "all clear" when it is not is worse than a
+  # slow one. Costs ~5s when empty.
+  #
+  # visibility-timeout 0 keeps anything found immediately available to the real
+  # worker, and nothing is ever deleted - this only looks.
   DURL=$(aws sqs get-queue-url --queue-name chess-cloud-analysis-dlq --region "$REGION" \
     --query QueueUrl --output text 2>/dev/null)
   if [ -n "$DURL" ] && [ "$DURL" != "None" ]; then
-    N=$(aws sqs get-queue-attributes --queue-url "$DURL" --region "$REGION" \
-      --attribute-names ApproximateNumberOfMessages \
-      --query 'Attributes.ApproximateNumberOfMessages' --output text 2>/dev/null)
-    [ "$N" = "0" ] && ok "dlq empty" || echo "  NOTE: $N message(s) in the DLQ - inspect, these failed every retry"
+    BODY=$(aws sqs receive-message --queue-url "$DURL" --region "$REGION" \
+      --wait-time-seconds 5 --visibility-timeout 0 \
+      --query 'Messages[0].Body' --output text 2>/dev/null)
+    if [ -z "$BODY" ] || [ "$BODY" = "None" ]; then
+      ok "dlq empty"
+    else
+      echo "  NOTE: message(s) in the DLQ - these failed every retry: $BODY"
+    fi
   fi
 fi
 
