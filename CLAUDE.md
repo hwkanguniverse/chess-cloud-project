@@ -26,6 +26,16 @@ This project is a learning exercise. The deliverable is understanding, not a fin
 
 **Still open:** visibility timeout, scale-in cooldown.
 
+### Open question for Phase 2 — authentication
+
+Nothing currently stops anyone with a valid game id from reading that game. Ids are hard to guess, which is not access control. The id format never protected anything; verifying *who is asking* does.
+
+Three options, undecided:
+
+- **Lichess OAuth2** — open, standard PKCE flow, no application or approval needed. Verifies the chess identity itself, which maps directly onto `PK = USER#<userId>`.
+- **Chess.com OAuth** — exists, but access is gated behind an application and approval, aimed mainly at connected-board and login integrations. Timeline not under our control. Awkward given the roadmap picked Chess.com's Published Data API for ingestion.
+- **Plain Cognito** — no chess-platform SSO; the app owns its own accounts. Simplest to build, but a user's chess username would then be a claim rather than something verified.
+
 ## Staying faithful to the roadmap
 
 The `aws-cert-plan` skill is the source of truth for architecture and cost decisions. This file is a working checklist derived from it — **it does not override it.** Where they disagree, the skill wins and this file gets fixed.
@@ -61,6 +71,8 @@ Fill in as decisions are made. Format: what was chosen, what was rejected, and w
 | Budget period | MONTHLY $5 | Keep ANNUALLY + add forecast alert | A $5/year cap is spent by one ordinary month, after which it sits permanently over and every alert becomes noise. The roadmap's guardrail is $5/month. |
 | Budget thresholds | FORECASTED 80% + ACTUAL 100% | Either alone | Forecast warns early enough to act; actual confirms. Forecasts are unreliable on a new account with no history, so the backstop stays. |
 | Faster tripwire | Budget + forecast only | CloudWatch billing alarm + SNS | Would duplicate Budgets and is bound by the same ~24h billing-data lag. `scripts/check-drift.sh` catches resource-level mistakes instantly and for free. |
+| Game lookup | Composite id — the id *is* the key | GSI on `gameId`; `PK = GAME#<gameId>` | DynamoDB computes an item's location from the partition key rather than searching, so a bare `gameId` would force a Scan. A GSI is eventually consistent — a poll right after submit could 404 on a game that exists — and roughly doubles write cost. `PK = GAME#` would break listing a user's games. |
+| Id delimiter | `.` (`hikaru.1723526400.abc123`) | `#`; base64url | In a URL path everything after `#` is a fragment and never reaches the server. Base64 is encoding, not encryption — one command decodes it — so it buys no privacy while making logs harder to read. Stored keys still use `#`. |
 | _(next)_ | | | |
 
 ---
@@ -112,12 +124,14 @@ Do this first — set it up once and never revisit it.
 
 Settle the keys **before** the table exists. A wrong partition key means a data migration; a wrong Lambda timeout is a one-line fix.
 
-- [ ] Confirm the two access patterns: get game by id; list a user's games newest first.
-- [ ] Understand the proposed key design and why the sort key orders by timestamp — then approve or change it.
-- [ ] Confirm both patterns are served without a secondary index.
+- [x] Access patterns confirmed: get game by id; list a user's games newest first.
+- [x] Keys settled: `PK = USER#<userId>`, `SK = GAME#<timestamp>#<gameId>`. The timestamp leads the sort key, so newest-first comes straight from storage order — no sorting in application code.
+- [x] Both patterns served without a secondary index — proven against the live table.
 - [x] **Billing: on-demand** — see decision log.
-- [ ] Check worst-case analysis payload against the 400KB per-item limit, before the engine generates real eval data.
-- [ ] Table live; one item written and read back.
+- [x] Table live (`chess-cloud-games`), both patterns verified with real items, test data removed.
+- [ ] Check worst-case analysis payload against the 400KB per-item limit, before the engine generates real eval data. *(Nothing to measure while the worker is fake — revisit when Stockfish lands.)*
+
+**Measured, for the interview answer:** a Scan filtering on a bare `gameId` read every item in the table to return one (`ScannedCount` 3, `Count` 1, 2.0 capacity units). The same fetch via composite id cost 0.5 units and read exactly one item. A 4× gap at three items, unbounded as the table grows — which is the whole reason the id carries the key.
 
 ## SQS — the queue
 
