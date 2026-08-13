@@ -52,8 +52,11 @@ variable "table_name" {
 #   SK = GAME#<timestamp>#<gameId>
 #
 # Pattern 1, get one game: the API hands clients a composite id
-# ("hikaru.1723526400.abc123") which the Lambda splits to rebuild both keys,
-# then does a single GetItem. A bare gameId could not work - DynamoDB computes
+# ("hikaru-1723526400-abc123") which the Lambda splits to rebuild both keys,
+# then does a single GetItem. Parsing is rsplit("-", 2), not split - usernames
+# may contain hyphens, so only the last two fields are safe to take, and
+# gameIds must be generated hyphen-free (uuid4().hex).
+# A bare gameId could not work - DynamoDB computes
 # an item's location from the partition key rather than searching for it, and
 # a gameId sits mid-string inside the sort key where prefix matching cannot
 # reach it. Finding it would mean scanning the whole table on every poll.

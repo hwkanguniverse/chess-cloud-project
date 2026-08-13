@@ -72,7 +72,8 @@ Fill in as decisions are made. Format: what was chosen, what was rejected, and w
 | Budget thresholds | FORECASTED 80% + ACTUAL 100% | Either alone | Forecast warns early enough to act; actual confirms. Forecasts are unreliable on a new account with no history, so the backstop stays. |
 | Faster tripwire | Budget + forecast only | CloudWatch billing alarm + SNS | Would duplicate Budgets and is bound by the same ~24h billing-data lag. `scripts/check-drift.sh` catches resource-level mistakes instantly and for free. |
 | Game lookup | Composite id — the id *is* the key | GSI on `gameId`; `PK = GAME#<gameId>` | DynamoDB computes an item's location from the partition key rather than searching, so a bare `gameId` would force a Scan. A GSI is eventually consistent — a poll right after submit could 404 on a game that exists — and roughly doubles write cost. `PK = GAME#` would break listing a user's games. |
-| Id delimiter | `.` (`hikaru.1723526400.abc123`) | `#`; base64url | In a URL path everything after `#` is a fragment and never reaches the server. Base64 is encoding, not encryption — one command decodes it — so it buys no privacy while making logs harder to read. Stored keys still use `#`. |
+| Id delimiter | `-` (`hikaru-1723526400-abc123`) | `.`; `#`; base64url | Conventional in URLs. In a URL path everything after `#` is a fragment and never reaches the server. Base64 is encoding, not encryption — one command decodes it — so it buys no privacy while making logs harder to read. Stored keys still use `#`. |
+| Id parsing | `rsplit("-", 2)` + hyphen-free gameIds | `split("-")` | Chess.com usernames may contain hyphens, so splitting left-to-right mis-parses `a-b_c1-...` into four parts and rebuilds the wrong key. Splitting from the right takes the last two fields — timestamp and gameId — and leaves the username whole. Requires gameIds with no hyphens: use `uuid4().hex`, not `str(uuid4())`. |
 | _(next)_ | | | |
 
 ---
@@ -132,6 +133,11 @@ Settle the keys **before** the table exists. A wrong partition key means a data 
 - [ ] Check worst-case analysis payload against the 400KB per-item limit, before the engine generates real eval data. *(Nothing to measure while the worker is fake — revisit when Stockfish lands.)*
 
 **Measured, for the interview answer:** a Scan filtering on a bare `gameId` read every item in the table to return one (`ScannedCount` 3, `Count` 1, 2.0 capacity units). The same fetch via composite id cost 0.5 units and read exactly one item. A 4× gap at three items, unbounded as the table grows — which is the whole reason the id carries the key.
+
+**Two rules the submit Lambda must honour** (both enforce the id format, not the table):
+
+- Generate gameIds with **no hyphens** — `uuid4().hex`, never `str(uuid4())`, which is hyphenated and would corrupt parsing.
+- Parse with **`rsplit("-", 2)`**, never `split("-")`. Usernames may contain hyphens; the timestamp and gameId never do, so taking the last two fields from the right is what keeps a username like `a-b_c1` intact.
 
 ## SQS — the queue
 
