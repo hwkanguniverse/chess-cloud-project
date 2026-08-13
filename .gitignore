@@ -42,3 +42,46 @@ terraform.rc
 # Optional: ignore plan files saved before destroying Terraform configuration
 # Uncomment the line below if you want to ignore planout files.
 # planout
+
+# Saved plan files - these can contain secrets in plaintext, including any
+# sensitive variable values resolved at plan time. Never commit them.
+*.tfplan
+tfplan
+*.tfplan.*
+
+# Terraform state pulled locally for inspection, and backup state files.
+# State contains every attribute of every resource, secrets included.
+*.tfstate.backup
+terraform.tfstate.d/
+
+# AWS credentials - must never reach the repo
+.aws/
+credentials
+*.pem
+*.ppk
+
+# Environment files (app config, DB URLs, API keys)
+.env
+.env.*
+!.env.example
+
+# Python (submit/status Lambdas, worker)
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node / TypeScript, if used for Lambdas
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Lambda build artifacts
+*.zip
+
+# OS and editor noise
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
