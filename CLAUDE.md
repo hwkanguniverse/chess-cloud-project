@@ -24,7 +24,7 @@ This project is a learning exercise. The deliverable is understanding, not a fin
 - **Say when I am wrong, and why.** Agreeing with a bad call to be pleasant wastes the exercise.
 - **Keep this file high level.** Purpose of each service and the decisions behind it. Implementation detail lives in the code, not here.
 
-**Still open:** scale-in cooldown.
+**Still open:** _none — all Phase 1 decisions made._
 
 ### Open question for Phase 2 — authentication
 
@@ -77,6 +77,8 @@ Fill in as decisions are made. Format: what was chosen, what was rejected, and w
 | Visibility timeout | 180s | 60s tuned to the fake worker | Sized for real analysis (30–90s/game) so the value never changes underneath us. Too short means a second worker starts a game the first is still analysing; too long means a crashed worker's message waits before retry. 3min of dead time is invisible at this scale. |
 | Max receives | 3 | 5; 2 | Rides out a transient crash or Spot reclaim, but quarantines a genuinely poison game fast — each retry costs a full analysis attempt in Fargate time, which is the thing actually billed. |
 | API flavor | HTTP API | REST API; Lambda Function URLs | Same job as REST at ~$1/M vs ~$3.50/M; the REST-only extras (API keys, usage plans, caching) have no consumer here, and HTTP API's built-in JWT authorizer is the slot Phase 2's OAuth choice plugs into. Function URLs are $0 but give two bare URLs with no routing and no authorizer — a roadmap deviation with nothing bought. |
+| Scale-in cooldown | 5 min of empty queue | 2 min; 15 min | Covers a user submitting games one at a time while thinking, so trickle traffic does not pay a 30–60s cold start plus the one-minute Fargate billing minimum per game. Lingering costs ~$0.001 per occurrence at this task size — the asymmetry favours patience. |
+| Worker capacity | Fargate Spot | On-demand Fargate | ~70% cheaper, and a reclaim mid-message is the same at-least-once path a crash exercises — max receives = 3 already budgets for it. At scale-to-zero volume the savings round to zero; the real value is watching a reclaim happen in a phase built for observing failure modes. |
 | Lambda timeout | 10s both | 3s; 29s | Real work is <1s; the timeout only bounds a hung dependency. 3s can kill a cold start plus one SDK retry that was going to succeed; 29s makes every client wait the full gateway cap to learn of a failure. |
 | _(next)_ | | | |
 
@@ -180,25 +182,29 @@ Neither does real work. That is the design: analysis takes 30–90 seconds, and 
 
 Fargate means containers without managing servers. **In Phase 1 the worker is fake:** receive a message, sleep 10 seconds, write a hardcoded result. Get the plumbing right before the engine arrives.
 
-- [ ] ECR repository — where the container image lives so ECS can pull it.
-- [ ] Worker loop: long-poll queue → sleep → write result → mark `COMPLETE` → delete message.
-- [ ] ECS cluster, task definition, service.
-- [ ] Understand **task role vs execution role** — commonly conflated. Execution role pulls the image and writes logs; task role is what your code uses to reach DynamoDB and SQS.
-- [ ] **No NAT Gateway** (~$32/mo, the classic trap) and **no load balancer** (~$17/mo). Nothing routes *to* a queue consumer — it reaches out, nothing reaches in.
-- [ ] End to end: submit → poll → `PENDING` flips to `COMPLETE` ~10s later, untouched.
+- [x] ECR repository — where the container image lives so ECS can pull it. Lifecycle policy keeps the last 5 images.
+- [x] Worker loop: long-poll queue → sleep → write result → mark `COMPLETE` → delete message. Result written *before* delete — the ordering that makes at-least-once safe.
+- [x] ECS cluster, task definition, service. Fargate Spot (see decision log), 0.25 vCPU / 512MB.
+- [x] Understand **task role vs execution role** — implemented as two scoped roles: execution pulls the image and writes logs (fails there = execution-role problem); task role is receive/delete on the queue + `UpdateItem` on the table (AccessDenied in code = task-role problem). Neither touches the DLQ, closing the IAM half of the redrive finding.
+- [x] **No NAT Gateway** and **no load balancer** — default-VPC public subnets, public IP, security group with zero ingress rules.
+- [x] End to end: submit → poll → `PENDING` flips to `COMPLETE`, untouched. ~10s when warm; ~2.5min from cold (SQS metric lag + 60s alarm period + task provisioning) — the price of scale-to-zero, acceptable by design.
+
+**Learned while testing:** ECS stop = SIGTERM, 30s grace, then SIGKILL. The fake worker's 10s job always finishes inside the grace, so a plain `stop-task` *cannot* interrupt it mid-message — the graceful path completes the game and deletes the message. Observing the ungraceful path required a temporary 2s `stopTimeout` (reverted). The real engine's 30–90s games will overrun the grace naturally, so both paths matter.
+
+Also observed: the queue-empty alarm watches *visible* messages, so it can scale the worker in while a message is still in flight. Safe by design — the message reappears via visibility timeout and re-trips the scale-out alarm — but it means a kill near scale-in costs one extra cold start. Watched it happen; self-healed.
 
 ## Failure paths
 
 The part most portfolio projects skip, and the part interviews actually probe.
 
-- [ ] **Kill a task mid-message.** Watch the visibility timeout expire and another task pick it up — at-least-once delivery observed rather than recited.
-- [ ] **Force a message to the DLQ** and confirm it lands.
-- [ ] Be able to explain **why no dedupe table is needed**: analysis is deterministic and overwrites the same item, so duplicates are safe. That reasoning beats bolting one on.
+- [x] **Kill a task mid-message.** Observed live: SIGKILL 5s into processing → no delete → game stayed `PENDING` through the 180s visibility timeout → a fresh task received the *same message a second time* → `COMPLETE` ~5.5min after the kill. Nothing lost.
+- [x] **Force a message to the DLQ** and confirm it lands — this time through the real worker's leave-on-failure path, not a manual consumer: worker logged `failed, leaving for retry/DLQ`, receive count climbed to 4 across 180s visibility cycles, message landed in the DLQ ~12min after send, body intact. One bad game can no longer block the queue, and the worker never deletes what it failed to process.
+- [x] **Why no dedupe table:** demonstrated, not recited — the kill drill delivered one message twice and the second delivery simply overwrote the same item with the same result. Deterministic analysis + idempotent write = duplicates are a non-event.
 
 ## Cost controls
 
-- [ ] **Scale to zero on queue depth** (min 0 tasks). The difference between ~$0 and ~$44/month of idle Fargate — the main cost lever in the design, not decoration.
-- [ ] Short **scale-in cooldown** — scaling to zero costs a 30–60s cold start plus a one-minute Fargate billing minimum, so trickled-in single games otherwise pay startup repeatedly.
+- [x] **Scale to zero on queue depth** (min 0 tasks). Step scaling on `ApproximateNumberOfMessagesVisible`: any message → 1 task, empty for 5min → 0. Watched it cycle 0→1→0 live. (Target tracking can't start from zero — every per-task ratio is undefined at 0 tasks.)
+- [x] Short **scale-in cooldown** — 5 minutes, see decision log.
 - [ ] `terraform destroy`, then `apply` again. If it does not come back clean you have drift or an unclear dependency — find it while the stack is small.
 - [ ] Check month-to-date spend is ~zero. If Fargate is not scaling to zero, this is where it shows.
 
