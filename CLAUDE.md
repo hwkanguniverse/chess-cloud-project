@@ -205,8 +205,8 @@ The part most portfolio projects skip, and the part interviews actually probe.
 
 - [x] **Scale to zero on queue depth** (min 0 tasks). Step scaling on `ApproximateNumberOfMessagesVisible`: any message → 1 task, empty for 5min → 0. Watched it cycle 0→1→0 live. (Target tracking can't start from zero — every per-task ratio is undefined at 0 tasks.)
 - [x] Short **scale-in cooldown** — 5 minutes, see decision log.
-- [ ] `terraform destroy`, then `apply` again. If it does not come back clean you have drift or an unclear dependency — find it while the stack is small.
-- [ ] Check month-to-date spend is ~zero. If Fargate is not scaling to zero, this is where it shows.
+- [x] `terraform destroy`, then `apply` again — done for the three stateless roots (worker → api → queue destroyed, 36 resources; rebuilt queue → api → worker in three clean applies plus one image re-push, end-to-end green). The data root stays out of the drill on purpose: `prevent_destroy` on the table is the point, not an obstacle. Two learnings: ECR needs `force_delete` or a destroy blocks on a non-empty repo, and recreating API Gateway mints a new endpoint URL — the reason production fronts it with a custom domain (later phase, if ever).
+- [x] Check month-to-date spend is ~zero — $0.00 actual per the Budgets API (free to query; Cost Explorer's API bills $0.01/call). Worker observed scaling 1→0 live after the 5-min cooldown.
 
 ---
 

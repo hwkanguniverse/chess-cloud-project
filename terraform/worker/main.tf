@@ -137,6 +137,7 @@ resource "aws_security_group" "worker" {
 resource "aws_ecr_repository" "worker" {
   name                 = "chess-cloud-worker"
   image_tag_mutability = "MUTABLE" # "latest" is re-pushed each build
+  force_delete         = true      # images are rebuildable artifacts, not data - destroy must not need a manual empty-the-repo step
 
   image_scanning_configuration {
     scan_on_push = true
