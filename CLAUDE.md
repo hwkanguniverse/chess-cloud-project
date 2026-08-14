@@ -24,7 +24,7 @@ This project is a learning exercise. The deliverable is understanding, not a fin
 - **Say when I am wrong, and why.** Agreeing with a bad call to be pleasant wastes the exercise.
 - **Keep this file high level.** Purpose of each service and the decisions behind it. Implementation detail lives in the code, not here.
 
-**Still open:** visibility timeout, scale-in cooldown.
+**Still open:** scale-in cooldown.
 
 ### Open question for Phase 2 — authentication
 
@@ -76,6 +76,8 @@ Fill in as decisions are made. Format: what was chosen, what was rejected, and w
 | Id parsing | `rsplit("-", 2)` + hyphen-free gameIds | `split("-")` | Chess.com usernames may contain hyphens, so splitting left-to-right mis-parses `a-b_c1-...` into four parts and rebuilds the wrong key. Splitting from the right takes the last two fields — timestamp and gameId — and leaves the username whole. Requires gameIds with no hyphens: use `uuid4().hex`, not `str(uuid4())`. |
 | Visibility timeout | 180s | 60s tuned to the fake worker | Sized for real analysis (30–90s/game) so the value never changes underneath us. Too short means a second worker starts a game the first is still analysing; too long means a crashed worker's message waits before retry. 3min of dead time is invisible at this scale. |
 | Max receives | 3 | 5; 2 | Rides out a transient crash or Spot reclaim, but quarantines a genuinely poison game fast — each retry costs a full analysis attempt in Fargate time, which is the thing actually billed. |
+| API flavor | HTTP API | REST API; Lambda Function URLs | Same job as REST at ~$1/M vs ~$3.50/M; the REST-only extras (API keys, usage plans, caching) have no consumer here, and HTTP API's built-in JWT authorizer is the slot Phase 2's OAuth choice plugs into. Function URLs are $0 but give two bare URLs with no routing and no authorizer — a roadmap deviation with nothing bought. |
+| Lambda timeout | 10s both | 3s; 29s | Real work is <1s; the timeout only bounds a hung dependency. 3s can kill a cold start plus one SDK retry that was going to succeed; 29s makes every client wait the full gateway cap to learn of a failure. |
 | _(next)_ | | | |
 
 ---
@@ -118,8 +120,8 @@ Do this first — set it up once and never revisit it.
 ## Repo scaffolding
 
 - [x] **Language: Python** — see decision log.
-- [ ] Directory layout: Terraform separate from application code, worker separate from handlers.
-- [ ] `terraform fmt` and `validate` runnable before anything is applied.
+- [x] Directory layout: `app/handlers/` for Lambda code (worker will live in `app/worker/`), one Terraform root per layer under `terraform/`.
+- [x] `terraform fmt` and `validate` runnable before anything is applied.
 
 ## DynamoDB — the data store
 
@@ -168,9 +170,9 @@ Queue depth being approximate is fine for autoscaling — cooldowns absorb it �
 
 Neither does real work. That is the design: analysis takes 30–90 seconds, and API Gateway hard-caps a request at **29 seconds** regardless of Lambda's own timeout. Queuing is not optional here — it is what the ceiling forces.
 
-- [ ] Both functions live behind API Gateway.
-- [ ] Each has its own role, scoped to just the table and queue it touches. No wildcards.
-- [ ] End to end: post a payload → `202` + id → item appears in DynamoDB → message appears in SQS.
+- [x] Both functions live behind API Gateway — HTTP API (see decision log), throttled to 10 req/s while the API has no auth.
+- [x] Each has its own role, scoped to just the table and queue it touches. No wildcards — submit gets `PutItem` + `SendMessage`, status gets `GetItem` only, logs scoped to each function's own pre-created log group.
+- [x] End to end: post a payload → `202` + id → item appears in DynamoDB → message appears in SQS → status URL returns `PENDING`. Verified live (hyphenated username, malformed-id 400, missing-game 404); test data removed.
 
 ## Fargate — the worker
 
