@@ -1,10 +1,12 @@
-# Phase 1 — Checklist
+# Phase 2 — Checklist
 
-**Goal:** the full pipeline shape working end to end with a *fake* worker. API Gateway → Lambda → DynamoDB → SQS → Fargate, all in Terraform, no Stockfish anywhere.
+**Goal:** put an identity in front of the pipeline. Today anyone holding a game id can read that game; by the end of this phase the API knows *who is asking*, refuses everything else, and knows which chess accounts that user has linked.
 
-**The rule that makes this phase work:** the worker receives a message, sleeps 10s, writes a hardcoded result. Nothing more. When something breaks you are debugging AWS *or* chess, never both at once. Resist adding the engine early — it is the single most expensive mistake available in this phase.
+**Auth is completed in this phase, not split across two.** Cognito login and account linking ship together — see the auth model below for why they are separable problems but a single phase.
 
-**Nothing is built yet.** The repo is `.gitignore`, `README.md`, and this file. Phase 1 needs almost no product code — a fake worker and two thin handlers. Real PGN parsing, Stockfish, and the dashboard all come later. Do not start writing chess logic during this phase.
+**The rule that makes this phase work:** the pipeline does not change. No new services in the data path, no touching the worker, no chess. Phase 1's plumbing stays exactly as it is and gains a front door with a lock. If a change would alter how a message flows from submit to `COMPLETE`, it belongs to a later phase.
+
+Phase 1 is complete and its checklist is preserved in [PHASE-1.md](PHASE-1.md) — read it for the decisions already made, do not redo them.
 
 Account: `961868442307` · Region: `ap-southeast-1` · IAM user: `terraform-admin` (MFA enabled)
 
@@ -12,29 +14,17 @@ Account: `961868442307` · Region: `ap-southeast-1` · IAM user: `terraform-admi
 
 ## How we work on this
 
-This project is a learning exercise. The deliverable is understanding, not a finished stack — a working pipeline I cannot explain is a failed phase.
+Unchanged from Phase 1, and still the point of the exercise. This project is a learning exercise; the deliverable is understanding, not a finished stack — a working stack I cannot explain is a failed phase.
 
 **Claude writes the code. I make the decisions, after I understand them.**
 
 - **Explain first, then write.** Before adding a service: what problem it solves in *this* app, what breaks without it, what it costs. Then I decide, then you write it.
-- **Ask, don't assume.** Any choice with a real trade-off — service selection, key design, timeouts, networking, billing mode — is mine. Present the options and what each costs, then wait.
+- **Ask, don't assume.** Any choice with a real trade-off — service selection, token lifetime, claim mapping, IAM boundary — is mine. Present the options and what each costs, then wait.
 - **Explain the failure mode a service exists to handle** in *this* app before adding it. If the honest answer is "real systems use it," it gets cut.
 - **Tick items off in this file as they are completed.** A stale checklist is worse than none.
 - **Record decisions in the log below** — choice, alternative, reason. The reasoning is what fades.
 - **Say when I am wrong, and why.** Agreeing with a bad call to be pleasant wastes the exercise.
 - **Keep this file high level.** Purpose of each service and the decisions behind it. Implementation detail lives in the code, not here.
-
-**Still open:** _none — all Phase 1 decisions made._
-
-### Open question for Phase 2 — authentication
-
-Nothing currently stops anyone with a valid game id from reading that game. Ids are hard to guess, which is not access control. The id format never protected anything; verifying *who is asking* does.
-
-Three options, undecided:
-
-- **Lichess OAuth2** — open, standard PKCE flow, no application or approval needed. Verifies the chess identity itself, which maps directly onto `PK = USER#<userId>`.
-- **Chess.com OAuth** — exists, but access is gated behind an application and approval, aimed mainly at connected-board and login integrations. Timeline not under our control. Awkward given the roadmap picked Chess.com's Published Data API for ingestion.
-- **Plain Cognito** — no chess-platform SSO; the app owns its own accounts. Simplest to build, but a user's chess username would then be a claim rather than something verified.
 
 ## Staying faithful to the roadmap
 
@@ -42,177 +32,149 @@ The `aws-cert-plan` skill is the source of truth for architecture and cost decis
 
 Rules that keep the two from drifting apart:
 
-- **Do not restate the skill's reasoning here** — reference it. Duplicated rationale is what drifts; two copies of a decision means nothing catches it when one changes.
+- **Do not restate the skill's reasoning here** — reference it. Duplicated rationale is what drifts.
 - **Re-read the skill at the start of each phase**, and before any decision it already covers. Do not work from memory of it.
-- **Any deviation goes in the Deviations table below, with a reason**, or it does not happen. Silent divergence is the failure mode.
-- **The skill is the constraint list, not a suggestion.** Specifically load-bearing for Phase 1: no NAT Gateway, no ALB, scale to zero, DynamoDB over RDS, Fargate over Lambda for the worker, fake worker before Stockfish, Terraform from commit one.
-- **If a constraint turns out to be wrong**, that is a finding — say so, and update the *skill* on the Claude account, not just this file. The skill already carries corrections; that is the mechanism working.
+- **Any deviation goes in the Deviations table below, with a reason**, or it does not happen.
+- **The skill is the constraint list, not a suggestion.** Load-bearing for Phase 2: least-privilege IAM with no wildcards, secrets in SSM/Secrets Manager rather than env files, and the "name the failure mode or cut it" test.
+- **If a constraint turns out to be wrong**, that is a finding — say so, and update the *skill* on the Claude account, not just this file.
 
-Run `bash scripts/check-drift.sh` after every apply. It checks the live account against the constraints that cost real money — NAT Gateway, load balancers, RDS, Fargate scale-to-zero, budget alerting — and exits non-zero on drift. Discipline fails silently; a script does not.
+*Access note: the skill is not readable from the Claude Code CLI — there is no `~/.claude/skills/` on this machine and account-level skills do not sync down. It was read this phase by exporting `aws-cert-plan.skill` (a zip containing `SKILL.md`) and unpacking it. Expect to re-export it at the start of each phase.*
 
-### Deviations from the roadmap
+Run `bash scripts/check-drift.sh` after every apply. It checks the live account against the constraints that cost real money and exits non-zero on drift. Discipline fails silently; a script does not.
+
+---
+
+## Where Phase 1 landed relative to the roadmap
+
+Phase 1 overshot. It built the full pipeline shape, which means work the skill schedules for Phases 3 and 6 is already done. Recorded here so it does not get built twice — the phase numbering below stays aligned with the skill's.
+
+**Build order is `1 → 2 → 3 → 6 → 4 → 5 → 7`.** Phase 6 is pulled ahead of 4 and 5 so the VPC/SAA material lands inside the SAA study window.
+
+| Skill phase | Status after Phase 1 | Genuinely remaining |
+|---|---|---|
+| 3 — presigned S3 → SQS → worker → DLQ, idempotency | SQS, DLQ, redrive, worker, at-least-once and the idempotency argument all built and drilled | The **presigned S3 upload** path only. Per the skill, Chess.com serves monthly archives as JSON/PGN directly, so presigned upload applies to the *pasted/uploaded PGN archive* input, not to API ingestion. |
+| 6 — VPC/subnets/SGs/task roles + autoscaling on SQS depth | Default-VPC public subnets, zero-ingress SG, split task/execution roles, step scaling to zero on queue depth — all live | A **custom VPC** with deliberate subnet design, if that is judged worth it over the default VPC. Currently unjustified: nothing routes inbound to the worker. |
+
+**Cert timing is explicitly not a constraint on this project** (decided 17 Aug 2026). Whether the VPC/SAA material is learned by building it here or on Skill Builder is immaterial, so Phase 6 is not scheduled against the SAA exam window and no phase ordering is justified on cert grounds. Build order still follows the skill; the reason is coherence, not exam dates.
+
+---
+
+## The auth model — decided
+
+Ids are hard to guess, which is not access control. The id format never protected anything; verifying who is asking does.
+
+**Authentication and account linking are two separate problems**, and the phase went wrong while they were treated as one. Splitting them is what unblocked it:
+
+- **Authentication — Cognito.** Who is this user, persistently, across sessions. A Cognito user pool owns the account; `sub` is the permanent key. `PK = USER#<cognito-sub>`.
+- **Account linking — per platform, after signup.** Which chess accounts has this user proven they own. Stored as attributes on the user, not as the user's identity.
+
+Linking is per-platform and optional, which is what removes the external dependency:
+
+- **Lichess** — OAuth2 PKCE, open, no application or approval. Buildable today, and the link is genuinely verified.
+- **Chess.com** — OAuth is approval-gated (aimed at connected-board and login integrations, timeline not ours). Until approval lands the username is stored **unverified**. The feature still works: the Published Data API is public, so analysis does not require a verified link.
+
+**Why not the alternatives:** plain Cognito alone leaves the chess username a self-asserted claim with no path to ever verifying it. Lichess-as-login verifies the wrong thing — it proves a Lichess identity while the skill ingests from Chess.com, so the verification does not transfer. Chess.com-as-login is the only single-provider option where identity and data agree, and it is the one that can stall indefinitely on someone else's approval queue.
+
+**Consequences:** a Cognito client secret exists, so Secrets Manager is now genuinely in scope with a nameable failure mode. Two trust levels exist (verified Lichess link vs unverified Chess.com username) and what each permits is a real decision, below.
+
+## Least-privilege IAM — auth-independent, start here
+
+**What it is for:** the blast radius of a compromised function. The skill lists "least-privilege IAM, no wildcard policies" as a Phase 2 deliverable, and Phase 1 already built to that standard — so this is an audit and a formalisation, not a rewrite.
+
+Verified in the Phase 1 code: submit holds `dynamodb:PutItem` + `sqs:SendMessage`, status holds `dynamodb:GetItem` only, each scoped to the exact table and queue ARNs with logs scoped to each function's own log group. The worker's task and execution roles are split. No wildcards anywhere.
+
+- [x] **Audit every policy against the live account** — done 17 Aug 2026. All four roles pulled live and matched against Terraform; `terraform plan` clean on all four stacks, so nothing was clicked in the console. Also verified: **zero managed policies attached** to any role (the usual way `AWSLambdaBasicExecutionRole` and its `logs:*` wildcard arrives), trust policies each scoped to one service principal, no resource-based policies on the queues or ECR, and no customer-managed policies in the account at all.
+- [x] **Prove a denial on purpose** — done 17 Aug 2026. status was temporarily given a `PutItem` attempt; DynamoDB returned `AccessDeniedException`, logged to `/aws/lambda/chess-cloud-status`, and a follow-up `get-item` confirmed the row was never written. Reverted, redeployed, drift-checked clean. This is the step that separates "the policy document looks right" from "IAM is enforcing it at runtime" — they are different claims.
+- [x] **Does the authorizer change any role's scope?** No, and the reasoning is worth keeping: the authorizer gates the **caller** (does this request reach the Lambda at all), the execution role gates the **function** (what may this code touch once running). Two boundaries at different layers, routinely conflated. Cognito changes who may call status; it does not change the fact that status must never be able to write. Roles stay exactly as they are.
+
+**The one `Resource: "*"` in the account is correct and is not a finding.** `chess-cloud-worker-execution` allows `ecr:GetAuthorizationToken` on `*` because it is a registry-level action — it returns a token for the whole registry, so no narrower ARN exists to scope it to. The image pull beside it *is* scoped to the exact repository ARN. Worth knowing precisely, because it is the kind of thing a naive policy scanner flags and a good answer explains.
+
+## Secrets and configuration — now in scope
+
+**What it is for:** keeping credentials out of source and out of environment variables. The skill lists SSM/Secrets Manager in Phase 2.
+
+**The failure mode, named:** the Cognito app client secret, and the Lichess OAuth client registration, are credentials that mint or exchange tokens. Leaked, they let someone impersonate the app in a token exchange. That is a real secret with a real blast radius — unlike `TABLE_NAME` and `QUEUE_URL`, which are non-secret identifiers and stay exactly where they are, in plain environment variables. Moving those into Parameter Store would be motion, not security.
+
+- [ ] Choose **Secrets Manager vs SSM Parameter Store** on cost and rotation need, and record why. SecureString parameters are free and sufficient for a static secret; Secrets Manager is ~$0.40/secret/month and earns it only if rotation is actually used.
+- [ ] Store the Cognito client secret there, not in Terraform state in plaintext and not in a `.tfvars` committed by accident.
+- [ ] Grant read access to **only** the function that needs it, scoped to that one secret's ARN — same standard as the rest of the IAM below.
+- [ ] Confirm no secret reaches CloudWatch. Logging a token or a client secret is the classic way this leaks.
+
+## The authorizer — the actual build
+
+**What it is for:** rejecting unauthenticated requests at the gateway, before any Lambda runs. Phase 1 chose HTTP API partly because its built-in JWT authorizer is the slot this plugs into — that decision was made with this phase in mind.
+
+- [ ] Cognito user pool + app client. Decide token lifetimes deliberately — short access tokens with refresh is the default worth defending.
+- [ ] JWT authorizer attached to the HTTP API, issuer and audience pointing at the user pool.
+- [ ] Both routes protected. Confirm the authorizer runs *before* the Lambda — an unauthenticated request should cost zero invocations.
+- [ ] Map the verified `sub` claim to `userId`. This is the load-bearing detail: `PK = USER#<cognito-sub>` must key off the *verified* claim, never a client-supplied field.
+- [ ] Remove or re-scope the 10 req/s throttle — it exists because the API has no auth, so revisit its purpose once it does.
+
+## Account linking — the second half of auth
+
+**What it is for:** proving a user owns the chess account whose games they are analysing. Cognito proves they own an account *here*; it says nothing about who they are on a chess site. Linking closes that gap where the platform allows it.
+
+Kept in this phase deliberately: the skill assigns no phase to Chess.com ingestion, so there is no later phase that would naturally host this. Deferring it would park it indefinitely, not schedule it.
+
+- [ ] Model linked accounts on the user item — platform, username, and a **verified** flag. Not a separate identity.
+- [ ] Lichess OAuth2 PKCE link flow. No client secret by design; the returned identity is trustworthy.
+- [ ] Chess.com placeholder: username stored **unverified** until OAuth approval exists. Decide whether to apply for approval now or leave it.
+- [ ] **Decide what an unverified link permits.** Chess.com data is public, so "unverified still allows analysis" is defensible — but decide it on purpose and record why. Two trust levels in one system is exactly the detail that gets probed.
+- [ ] Decide what happens when a user links an account someone else has already linked.
+
+## Failure paths
+
+The part most portfolio projects skip, and the part interviews actually probe. Phase 1 set the standard: drills, watched live, not assertions.
+
+- [ ] **No token** → `401` at the gateway, Lambda never invoked. Confirm in the logs, not just the response.
+- [ ] **Expired token** → `401`. Requires deliberately minting a short-lived one.
+- [ ] **Valid token, someone else's game** → `403` or `404`, decided on purpose. Leaking existence via a `403` is a real distinction; pick one and record why.
+- [ ] **Tampered signature** → rejected.
+- [ ] **Token from a different user pool**, correctly signed but wrong issuer → rejected. Checking the signature is not the same as checking who signed it.
+- [ ] **Abandoned OAuth link flow** — user starts a Lichess link and never returns. Confirm no half-written link is left on the user item.
+
+## Cost controls
+
+- [ ] Confirm Cognito stays free at this scale — the free tier is 50,000 MAU for user-pool sign-ins, which a personal project will not approach. Verify the current figure rather than trusting this line.
+- [ ] If Secrets Manager is chosen over SSM SecureString, that is ~$0.40/secret/month — small, but it is the first recurring charge this project has taken on. Justify it or use Parameter Store.
+- [ ] Re-run `scripts/check-drift.sh` after each apply.
+- [ ] Month-to-date spend still ~zero via the Budgets API — free to query, unlike Cost Explorer at $0.01/call.
+
+---
+
+## Deviations from the roadmap
 
 | Deviation | Skill says | We did | Why |
 |---|---|---|---|
 | Phase 3 worker | Lambda worker | Fargate worker | Already reconciled *in* the skill — the chess adjustment makes the worker core infrastructure, not a throwaway lab. |
-| _(none yet)_ | | | |
+| Phase 1 scope | Phase 1 is API GW + Lambda + DynamoDB + budget | Also built SQS, DLQ, Fargate worker, autoscaling | The skill's own Phase 1 brief ("fake worker, full pipeline shape") required it. Pulls work forward from Phases 3 and 6; recorded in the table above so it is not built twice. |
+| Phase 2 scope | "Cognito or JWT, least-privilege IAM, SSM/Secrets Manager" | Also account linking (Lichess OAuth + Chess.com placeholder) | The skill treats identity as one deliverable, but proving *chess* account ownership is a second problem it does not address — it never assigns Chess.com ingestion a phase at all. Linking has no later home, so it ships here. Roughly doubles the phase. |
+| Phase 6 timing | Pulled ahead of 4 and 5 so the VPC lab lands in the SAA study window | Keep the `1 → 2 → 3 → 6` order, but on coherence grounds only | The skill's stated reason for the reordering is the exam window, and cert timing is explicitly not a constraint here (17 Aug 2026). Same order, different justification — recorded so the reasoning does not get re-derived from the skill's premise. |
+| _(next)_ | | | |
 
 ## Decision log
 
-Fill in as decisions are made. Format: what was chosen, what was rejected, and why.
+Phase 1's decisions are in [PHASE-1.md](PHASE-1.md) and still binding — this table records Phase 2 onwards only.
 
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
-| Region | `ap-southeast-1` | — | Matches the cost model; closest region. |
-| State locking | S3 `use_lockfile` | DynamoDB lock table | Native locking since TF 1.10; lock table deprecated in 1.11. |
-| DynamoDB billing | On-demand | Provisioned | Bursty traffic — idle most of the time, then 200 games at once. Provisioned would bill for capacity that sits unused, and throttle the burst if set too low. |
-| Language | Python | Node/TS, Go | Fastest to write; `boto3` well documented; `python-chess` is the standard PGN library for when Stockfish arrives, so the language does not need revisiting later. |
-| State bucket | `chess-cloud-tfstate-961868442307` | Random suffix; bare name | Account-ID suffix is the standard convention and guarantees global uniqueness. Discloses the account ID, which is not a credential. Bare name leaves no room for a second account or environment later. |
-| Budget period | MONTHLY $5 | Keep ANNUALLY + add forecast alert | A $5/year cap is spent by one ordinary month, after which it sits permanently over and every alert becomes noise. The roadmap's guardrail is $5/month. |
-| Budget thresholds | FORECASTED 80% + ACTUAL 100% | Either alone | Forecast warns early enough to act; actual confirms. Forecasts are unreliable on a new account with no history, so the backstop stays. |
-| Faster tripwire | Budget + forecast only | CloudWatch billing alarm + SNS | Would duplicate Budgets and is bound by the same ~24h billing-data lag. `scripts/check-drift.sh` catches resource-level mistakes instantly and for free. |
-| Game lookup | Composite id — the id *is* the key | GSI on `gameId`; `PK = GAME#<gameId>` | DynamoDB computes an item's location from the partition key rather than searching, so a bare `gameId` would force a Scan. A GSI is eventually consistent — a poll right after submit could 404 on a game that exists — and roughly doubles write cost. `PK = GAME#` would break listing a user's games. |
-| Id delimiter | `-` (`hikaru-1723526400-abc123`) | `.`; `#`; base64url | Conventional in URLs. In a URL path everything after `#` is a fragment and never reaches the server. Base64 is encoding, not encryption — one command decodes it — so it buys no privacy while making logs harder to read. Stored keys still use `#`. |
-| Id parsing | `rsplit("-", 2)` + hyphen-free gameIds | `split("-")` | Chess.com usernames may contain hyphens, so splitting left-to-right mis-parses `a-b_c1-...` into four parts and rebuilds the wrong key. Splitting from the right takes the last two fields — timestamp and gameId — and leaves the username whole. Requires gameIds with no hyphens: use `uuid4().hex`, not `str(uuid4())`. |
-| Visibility timeout | 180s | 60s tuned to the fake worker | Sized for real analysis (30–90s/game) so the value never changes underneath us. Too short means a second worker starts a game the first is still analysing; too long means a crashed worker's message waits before retry. 3min of dead time is invisible at this scale. |
-| Max receives | 3 | 5; 2 | Rides out a transient crash or Spot reclaim, but quarantines a genuinely poison game fast — each retry costs a full analysis attempt in Fargate time, which is the thing actually billed. |
-| API flavor | HTTP API | REST API; Lambda Function URLs | Same job as REST at ~$1/M vs ~$3.50/M; the REST-only extras (API keys, usage plans, caching) have no consumer here, and HTTP API's built-in JWT authorizer is the slot Phase 2's OAuth choice plugs into. Function URLs are $0 but give two bare URLs with no routing and no authorizer — a roadmap deviation with nothing bought. |
-| Scale-in cooldown | 5 min of empty queue | 2 min; 15 min | Covers a user submitting games one at a time while thinking, so trickle traffic does not pay a 30–60s cold start plus the one-minute Fargate billing minimum per game. Lingering costs ~$0.001 per occurrence at this task size — the asymmetry favours patience. |
-| Worker capacity | Fargate Spot | On-demand Fargate | ~70% cheaper, and a reclaim mid-message is the same at-least-once path a crash exercises — max receives = 3 already budgets for it. At scale-to-zero volume the savings round to zero; the real value is watching a reclaim happen in a phase built for observing failure modes. |
-| Lambda timeout | 10s both | 3s; 29s | Real work is <1s; the timeout only bounds a hung dependency. 3s can kill a cold start plus one SDK retry that was going to succeed; 29s makes every client wait the full gateway cap to learn of a failure. |
+| Phase 2 file structure | Keep skill numbering; record Phase 1's overshoot | Fold leftover Phase 3/6 work into Phase 2 | Renumbering would drift this file from the skill, and the skill is the source of truth. The overlap table carries the same information without breaking the mapping. |
+| Auth route | Cognito for login + per-platform account linking | Lichess-as-login; Chess.com-as-login; plain Cognito alone | Authentication and linking are separate problems; treating them as one was what made the decision look blocked. Cognito owns the durable identity, linking proves chess ownership per platform. Lichess-as-login verifies the wrong thing given Chess.com ingestion — the verification does not transfer. Chess.com-as-login is the only coherent single-provider option and is approval-gated, so it can stall indefinitely. |
+| Chess.com link, unverified | Store the username unverified; still allow analysis | Block until OAuth approval | The Published Data API is public, so analysis genuinely does not need a verified link. Blocking would trade a working feature for a guarantee the data does not require. Revisit if approval lands. |
+| Auth scope | Complete auth in Phase 2, linking included | Ship Cognito in Phase 2, defer linking | The skill assigns no phase to Chess.com ingestion, so there was no later phase for linking to land in — deferring would have parked it, not scheduled it. Cost is roughly double the original Phase 2 scope. |
+| Cert timing as a constraint | Ignore it; sequence on coherence | Pull Phase 6 forward to sit inside the SAA window | The material can be learned here or on Skill Builder and the exam date does not depend on the build. Removing this unblocks phase ordering from an external clock. |
+| IAM denial drill target | Write to a dedicated `DRILL#iam` key | Mutate a real game item | The table was empty, so a dedicated key proved the same thing with no path to touching real data. It also inverts the evidence usefully: a *broken* boundary leaves a visible stray item rather than silently passing. |
+| `ecr:GetAuthorizationToken` on `*` | Keep it | Try to scope it to the repository ARN | It is a registry-level action with no resource-level ARN — `*` is the only valid value AWS accepts. Scoping is applied to the image-pull actions beside it. Recorded so it is not "fixed" later by someone reading the wildcard rule literally. |
+| `terraform-admin` holds `AdministratorAccess` | Leave it this phase, note it | Tighten to a scoped deploy policy now | Out of scope: the skill's constraint is on the app's roles, which are clean. It is the widest thing in the account and has MFA. A real exercise if wanted later — not Phase 2 work, but recorded so it is a decision rather than an oversight. |
 | _(next)_ | | | |
-
----
-
-## Already done — do not redo
-
-Verified against the live account on 2026-08-13:
-
-- [x] AWS CLI v2.36.22 authenticated as `terraform-admin`
-- [x] Terraform v1.15.8 (≥1.10, so S3 native locking is available)
-- [x] Default region `ap-southeast-1` — matches the cost model
-- [x] MFA on `terraform-admin`
-- [x] Budget `5budget` exists at $5
-
----
-
-## Guardrails
-
-**What they are for:** the expensive mistakes here bill by the hour and are silent — a NAT Gateway (~$32/mo) or an idle Fargate task (~$44/mo) does not announce itself. The budget is the thing that notices before the credits are gone and the account auto-closes.
-
-- [x] Budget defined in Terraform — `terraform/guardrails/`, reproducible and reviewable.
-- [x] **MONTHLY** $5, not annual. The original was a $5 *annual* cap running to 2087; one ordinary month would exhaust it, leaving it permanently over and every alert meaningless.
-- [x] **FORECASTED > 80%** — projects the run rate and warns while there is still time to act.
-- [x] **ACTUAL > 100%** — backstop that confirms the spend, since forecasts are unreliable on an account with no billing history.
-- [x] Old console-managed `5budget` deleted; replacement verified live before removal so there was no unprotected window.
-
-## S3 — remote state
-
-**What it is for:** Terraform records what it built in a state file. Kept locally it is one laptop away from being lost, and nothing else can safely run against it. In S3 it is durable, versioned, and locked so two runs cannot corrupt it.
-
-Do this first — set it up once and never revisit it.
-
-- [x] Bucket name decided: `chess-cloud-tfstate-961868442307`.
-- [x] Bucket created: versioned, public access blocked, encrypted, `prevent_destroy`, old versions expire after 90 days.
-- [x] Backend configured with native S3 locking (`use_lockfile`), no DynamoDB lock table.
-- [x] `terraform init` clean against S3 — `terraform/guardrails/` runs on the remote backend.
-
-*Order trap, handled: the bucket cannot be created by a run that already uses it as its backend. `terraform/bootstrap/` stays on local state and creates the bucket; everything else uses S3.*
-
-## Repo scaffolding
-
-- [x] **Language: Python** — see decision log.
-- [x] Directory layout: `app/handlers/` for Lambda code (worker will live in `app/worker/`), one Terraform root per layer under `terraform/`.
-- [x] `terraform fmt` and `validate` runnable before anything is applied.
-
-## DynamoDB — the data store
-
-**What it is for:** holds each game's status and, later, its analysis. Chosen over a relational database because this app has exactly two fixed access patterns and no need for joins or ad-hoc queries. With fixed patterns, DynamoDB is the *better* answer, not just the cheaper one.
-
-Settle the keys **before** the table exists. A wrong partition key means a data migration; a wrong Lambda timeout is a one-line fix.
-
-- [x] Access patterns confirmed: get game by id; list a user's games newest first.
-- [x] Keys settled: `PK = USER#<userId>`, `SK = GAME#<timestamp>#<gameId>`. The timestamp leads the sort key, so newest-first comes straight from storage order — no sorting in application code.
-- [x] Both patterns served without a secondary index — proven against the live table.
-- [x] **Billing: on-demand** — see decision log.
-- [x] Table live (`chess-cloud-games`), both patterns verified with real items, test data removed.
-- [ ] Check worst-case analysis payload against the 400KB per-item limit, before the engine generates real eval data. *(Nothing to measure while the worker is fake — revisit when Stockfish lands.)*
-
-**Measured, for the interview answer:** a Scan filtering on a bare `gameId` read every item in the table to return one (`ScannedCount` 3, `Count` 1, 2.0 capacity units). The same fetch via composite id cost 0.5 units and read exactly one item. A 4× gap at three items, unbounded as the table grows — which is the whole reason the id carries the key.
-
-**Two rules the submit Lambda must honour** (both enforce the id format, not the table):
-
-- Generate gameIds with **no hyphens** — `uuid4().hex`, never `str(uuid4())`, which is hyphenated and would corrupt parsing.
-- Parse with **`rsplit("-", 2)`**, never `split("-")`. Usernames may contain hyphens; the timestamp and gameId never do, so taking the last two fields from the right is what keeps a username like `a-b_c1` intact.
-
-## SQS — the queue
-
-**What it is for:** three jobs at once. It **decouples** submit from analysis so the API can answer immediately. It **load-levels** — a 500-game upload is accepted in a second and drained at whatever rate the worker manages. And its depth is the **autoscaling signal**, which is what makes scale-to-zero possible.
-
-The DLQ catches messages that fail repeatedly, so one bad game cannot block the queue forever.
-
-- [x] Queue and DLQ created together — retrofitting a DLQ after a poison message is worse.
-- [x] **Visibility timeout: 180s.** Sized for real Stockfish analysis (30–90s/game), not the 10s fake worker, so it never needs revisiting when the engine lands.
-- [x] **Max receives: 3** before redrive to the DLQ.
-- [x] **Long polling (20s).** The default of 0 is short polling — the worker asks, gets an instant "no", and asks again in a tight loop, burning CPU and API calls while idle.
-- [x] Redrive proven on the live queue: receive counts climbed 1 → 2 → 3, the message vanished from the main queue on the 4th attempt, and arrived in the DLQ with its body intact.
-
-**Learned while testing:** `ApproximateNumberOfMessages` lags in *both* directions — observed reporting 1 for an already-empty DLQ, and 0 for a DLQ that held a message. `check-drift.sh` therefore polls the DLQ rather than reading the counter: a check that reports "all clear" when it is not is worse than a slow one. Costs a few seconds per run; it never deletes, and receives at visibility 0 so anything found stays available to the real worker.
-
-Queue depth being approximate is fine for autoscaling — cooldowns absorb it — but not for a correctness check. A CloudWatch alarm on DLQ depth is the proper push-based answer and belongs in Phase 4 with the rest of the alarms.
-
-**Correction:** `redrive_allow_policy` restricts which queues may redrive *into* the DLQ. It does **not** block a direct `SendMessage` — that succeeded in testing. Keeping redrive the only real path into the DLQ is an IAM job, handled when the Lambda and worker roles are scoped.
-
-## Lambda + API Gateway — the front door
-
-**What they are for:** two small functions that run only when called and cost nothing idle. API Gateway is the HTTP front door; Lambda is the code behind it.
-
-- **Submit** — accept the request, record it as `PENDING`, put a message on the queue, return `202` immediately with a URL to poll.
-- **Status** — look up one game and return it. The client polls this. No websockets.
-
-Neither does real work. That is the design: analysis takes 30–90 seconds, and API Gateway hard-caps a request at **29 seconds** regardless of Lambda's own timeout. Queuing is not optional here — it is what the ceiling forces.
-
-- [x] Both functions live behind API Gateway — HTTP API (see decision log), throttled to 10 req/s while the API has no auth.
-- [x] Each has its own role, scoped to just the table and queue it touches. No wildcards — submit gets `PutItem` + `SendMessage`, status gets `GetItem` only, logs scoped to each function's own pre-created log group.
-- [x] End to end: post a payload → `202` + id → item appears in DynamoDB → message appears in SQS → status URL returns `PENDING`. Verified live (hyphenated username, malformed-id 400, missing-game 404); test data removed.
-
-## Fargate — the worker
-
-**What it is for:** the analysis job that Lambda cannot do. Later it runs Stockfish — a heavy native binary, CPU-bound, on batches that blow past Lambda's 15-minute ceiling, and it benefits from keeping a warm engine process between games. This is the rare case where "why not Lambda" has a real answer.
-
-Fargate means containers without managing servers. **In Phase 1 the worker is fake:** receive a message, sleep 10 seconds, write a hardcoded result. Get the plumbing right before the engine arrives.
-
-- [x] ECR repository — where the container image lives so ECS can pull it. Lifecycle policy keeps the last 5 images.
-- [x] Worker loop: long-poll queue → sleep → write result → mark `COMPLETE` → delete message. Result written *before* delete — the ordering that makes at-least-once safe.
-- [x] ECS cluster, task definition, service. Fargate Spot (see decision log), 0.25 vCPU / 512MB.
-- [x] Understand **task role vs execution role** — implemented as two scoped roles: execution pulls the image and writes logs (fails there = execution-role problem); task role is receive/delete on the queue + `UpdateItem` on the table (AccessDenied in code = task-role problem). Neither touches the DLQ, closing the IAM half of the redrive finding.
-- [x] **No NAT Gateway** and **no load balancer** — default-VPC public subnets, public IP, security group with zero ingress rules.
-- [x] End to end: submit → poll → `PENDING` flips to `COMPLETE`, untouched. ~10s when warm; ~2.5min from cold (SQS metric lag + 60s alarm period + task provisioning) — the price of scale-to-zero, acceptable by design.
-
-**Learned while testing:** ECS stop = SIGTERM, 30s grace, then SIGKILL. The fake worker's 10s job always finishes inside the grace, so a plain `stop-task` *cannot* interrupt it mid-message — the graceful path completes the game and deletes the message. Observing the ungraceful path required a temporary 2s `stopTimeout` (reverted). The real engine's 30–90s games will overrun the grace naturally, so both paths matter.
-
-Also observed: the queue-empty alarm watches *visible* messages, so it can scale the worker in while a message is still in flight. Safe by design — the message reappears via visibility timeout and re-trips the scale-out alarm — but it means a kill near scale-in costs one extra cold start. Watched it happen; self-healed.
-
-## Failure paths
-
-The part most portfolio projects skip, and the part interviews actually probe.
-
-- [x] **Kill a task mid-message.** Observed live: SIGKILL 5s into processing → no delete → game stayed `PENDING` through the 180s visibility timeout → a fresh task received the *same message a second time* → `COMPLETE` ~5.5min after the kill. Nothing lost.
-- [x] **Force a message to the DLQ** and confirm it lands — this time through the real worker's leave-on-failure path, not a manual consumer: worker logged `failed, leaving for retry/DLQ`, receive count climbed to 4 across 180s visibility cycles, message landed in the DLQ ~12min after send, body intact. One bad game can no longer block the queue, and the worker never deletes what it failed to process.
-- [x] **Why no dedupe table:** demonstrated, not recited — the kill drill delivered one message twice and the second delivery simply overwrote the same item with the same result. Deterministic analysis + idempotent write = duplicates are a non-event.
-
-## Cost controls
-
-- [x] **Scale to zero on queue depth** (min 0 tasks). Step scaling on `ApproximateNumberOfMessagesVisible`: any message → 1 task, empty for 5min → 0. Watched it cycle 0→1→0 live. (Target tracking can't start from zero — every per-task ratio is undefined at 0 tasks.)
-- [x] Short **scale-in cooldown** — 5 minutes, see decision log.
-- [x] `terraform destroy`, then `apply` again — done for the three stateless roots (worker → api → queue destroyed, 36 resources; rebuilt queue → api → worker in three clean applies plus one image re-push, end-to-end green). The data root stays out of the drill on purpose: `prevent_destroy` on the table is the point, not an obstacle. Two learnings: ECR needs `force_delete` or a destroy blocks on a non-empty repo, and recreating API Gateway mints a new endpoint URL — the reason production fronts it with a custom domain (later phase, if ever).
-- [x] Check month-to-date spend is ~zero — $0.00 actual per the Budgets API (free to query; Cost Explorer's API bills $0.01/call). Worker observed scaling 1→0 live after the 5-min cooldown.
 
 ---
 
 ## Watch for
 
-- **State drift after console fixes.** Clicking something in the console without reflecting it in Terraform is how the config quietly stops describing reality. If you click, port it back immediately.
-- **Scope creep into chess.** The fake worker is the deliverable. PGN parsing, Stockfish, and the aggregate dashboard are all later phases.
-- **This will feel too easy** given you already know EC2, Docker and API Gateway. Expected — the deliverable is Terraform-from-commit-one discipline and a pipeline whose failure modes you have personally watched, not novel services.
-- **Know the monthly cost and what drives it.** Very few grads can; the skill calls this the interview edge.
+- **Auth is the whole phase.** If the pipeline changes shape this phase, something has gone wrong. Login and linking both sit in front of the API; neither touches submit → SQS → worker → `COMPLETE`.
+- **This phase is now roughly twice its original size.** That was a deliberate call, but it is the thing most likely to sprawl. Linking is *store and verify an account*, not a social graph, not a profile system, not a settings page.
+- **Scope creep into chess.** Still the standing risk. PGN parsing, Stockfish, and the dashboard are later phases — Stockfish is not Phase 2 under any reading.
+- **Do not add a service because the skill lists it.** The "name the failure mode" test outranks the list. Secrets Manager earned its place this phase only because a real client secret now exists — that argument does not generalise to the next service.
+- **Two trust levels is a design, not an accident.** Verified Lichess links and unverified Chess.com usernames must differ on purpose, and the difference must be written down before it is implemented.
+- **Know the monthly cost and what drives it.** Very few grads can; the skill calls this the interview edge. Cognito and Secrets Manager are the first things here with a per-unit price — know both.
