@@ -75,7 +75,7 @@ Linking is per-platform and optional, which is what removes the external depende
 
 **Why not the alternatives:** plain Cognito alone leaves the chess username a self-asserted claim with no path to ever verifying it. Lichess-as-login verifies the wrong thing — it proves a Lichess identity while the skill ingests from Chess.com, so the verification does not transfer. Chess.com-as-login is the only single-provider option where identity and data agree, and it is the one that can stall indefinitely on someone else's approval queue.
 
-**Consequences:** a Cognito client secret exists, so Secrets Manager is now genuinely in scope with a nameable failure mode. Two trust levels exist (verified Lichess link vs unverified Chess.com username) and what each permits is a real decision, below.
+**Consequences:** two trust levels exist (verified Lichess link vs unverified Chess.com username) and what each permits is a real decision, below. Note that Cognito does *not* bring a client secret with it — the browser client is public and uses PKCE, so the secrets section stays empty. That was initially recorded the other way round and corrected once the client type was settled.
 
 ## Least-privilege IAM — auth-independent, start here
 
@@ -89,26 +89,52 @@ Verified in the Phase 1 code: submit holds `dynamodb:PutItem` + `sqs:SendMessage
 
 **The one `Resource: "*"` in the account is correct and is not a finding.** `chess-cloud-worker-execution` allows `ecr:GetAuthorizationToken` on `*` because it is a registry-level action — it returns a token for the whole registry, so no narrower ARN exists to scope it to. The image pull beside it *is* scoped to the exact repository ARN. Worth knowing precisely, because it is the kind of thing a naive policy scanner flags and a good answer explains.
 
-## Secrets and configuration — now in scope
+## Secrets and configuration — correctly empty, so far
 
 **What it is for:** keeping credentials out of source and out of environment variables. The skill lists SSM/Secrets Manager in Phase 2.
 
-**The failure mode, named:** the Cognito app client secret, and the Lichess OAuth client registration, are credentials that mint or exchange tokens. Leaked, they let someone impersonate the app in a token exchange. That is a real secret with a real blast radius — unlike `TABLE_NAME` and `QUEUE_URL`, which are non-secret identifiers and stay exactly where they are, in plain environment variables. Moving those into Parameter Store would be motion, not security.
+**There is still no secret in this app, and that is the finding.** The client is a browser page, so the app client is public and Cognito generates no secret for it — verified live: `ClientSecret` is absent on `chess-cloud-web`. PKCE covers the code exchange instead. A confidential client *would* have a secret, but choosing one to create work would mean shipping a secret to a browser, which is not a secret at all.
 
-- [ ] Choose **Secrets Manager vs SSM Parameter Store** on cost and rotation need, and record why. SecureString parameters are free and sufficient for a static secret; Secrets Manager is ~$0.40/secret/month and earns it only if rotation is actually used.
-- [ ] Store the Cognito client secret there, not in Terraform state in plaintext and not in a `.tfvars` committed by accident.
-- [ ] Grant read access to **only** the function that needs it, scoped to that one secret's ARN — same standard as the rest of the IAM below.
-- [ ] Confirm no secret reaches CloudWatch. Logging a token or a client secret is the classic way this leaks.
+Everything the functions receive — `TABLE_NAME`, `QUEUE_URL`, region, and now the user pool id and client id — is a non-secret identifier. The client id appears in the login URL by design. Plain environment variables are the correct home for all of it; Parameter Store would be motion, not security.
+
+- [x] **Conclusion recorded: we did not need it.** By the skill's own "name the failure mode or cut it" test, an empty section is the right outcome, not a gap. Do not re-add it out of habit.
+- [ ] Revisit **only** if Lichess linking turns out to need a stored client credential. Decide then, on rotation need, and record why.
 
 ## The authorizer — the actual build
 
 **What it is for:** rejecting unauthenticated requests at the gateway, before any Lambda runs. Phase 1 chose HTTP API partly because its built-in JWT authorizer is the slot this plugs into — that decision was made with this phase in mind.
 
-- [ ] Cognito user pool + app client. Decide token lifetimes deliberately — short access tokens with refresh is the default worth defending.
-- [ ] JWT authorizer attached to the HTTP API, issuer and audience pointing at the user pool.
-- [ ] Both routes protected. Confirm the authorizer runs *before* the Lambda — an unauthenticated request should cost zero invocations.
-- [ ] Map the verified `sub` claim to `userId`. This is the load-bearing detail: `PK = USER#<cognito-sub>` must key off the *verified* claim, never a client-supplied field.
-- [ ] Remove or re-scope the 10 req/s throttle — it exists because the API has no auth, so revisit its purpose once it does.
+- [x] **Cognito user pool + app client** — built 17 Aug 2026 in `terraform/auth/`, a separate root from `api/` because the two have opposite lifecycles: handlers redeploy constantly, a user pool holds real accounts and carries `deletion_protection`. Lite tier, MFA off, email as username, 1h access / 30d refresh, code flow only, SRP only (no `USER_PASSWORD_AUTH`, which would put the raw password on the wire). Hosted UI live; JWKS endpoint serving RS256 keys.
+- [x] **JWT authorizer attached**, issuer and audience pointing at the pool. Audience is the app client id, so a token minted for another client of the same pool is rejected here.
+- [x] **Both routes protected**, and the *"costs zero invocations"* claim proven rather than assumed: three rejected requests produced **0 `START` records** in either function's log group. The gateway rejects before the integration runs.
+- [x] **Verified `sub` mapped to `userId`.** `PK = USER#<cognito-sub>`, read from `requestContext.authorizer.jwt.claims` — a field only API Gateway can populate, and only after validating the signature. Confirmed live: a submit sending `{"username": "hikaru"}` stored `PK = USER#593a550c-…`, with `hikaru` demoted to an attribute.
+- [x] **Throttle kept, re-scoped.** It no longer guards against anonymous hammering — the authorizer does that for free at 401. What remains is a blast-radius limit on an *authenticated* caller: a runaway polling loop or one compromised account still cannot run up a Lambda bill.
+
+**Consequence worth noting:** the composite id lost its username field. It was `username-timestamp-gameId`; the partition now comes from the token, so it is `timestamp-gameId` and only has to be unique within a user. The worker takes `userId` from the SQS message body rather than parsing it out of the id.
+
+## The product correction — analysis is public and shared
+
+**Surfaced 17 Aug 2026, while scoping linking.** The unit of work is a *player's profile*, not a single game: the point of the app is seeing skill across many games. Analysis results are public — anyone may view anyone's profile — and re-analysing a player someone else has already analysed is pure waste.
+
+That reverses this phase's earlier `PK = USER#<cognito-sub>` decision, and the reversal is correct. That decision was argued on enforcing *ownership* by the key. If profiles are public there is no ownership to enforce, so it was solving a problem this product does not have. The skill agrees: it treats Chess.com's monthly archives as "one queue message per user-month, not per game" and builds its cost story on ETags making re-analysis nearly free — both of which assume analysis is keyed by chess account.
+
+**Two separate things, previously tangled:**
+
+| | Key | Visibility |
+|---|---|---|
+| **Analysis** | `PK = PLAYER#<platform>#<username>`, `SK = ARCHIVE#<yyyy-mm>` | Public, shared, deduplicated |
+| **User** | `PK = USER#<cognito-sub>`, `SK = PROFILE` / `LINK#<platform>` | Private to that user |
+
+A user's links are a private pointer *into* shared analysis. Two users analysing the same player hit one partition; the second reuses the result.
+
+- [x] **Re-keyed analysis to `PLAYER#<platform>#<username>` / `ARCHIVE#<yyyy-mm>`** — done 17 Aug 2026. Submit, status, the worker and the queue message body all moved together. Verified live: a submit stored `PLAYER#chesscom#hikaru` / `ARCHIVE#2026-08`.
+- [x] **Id is now `platform/username/yyyy-mm`**, carried as three path segments (`GET /analysis/{platform}/{username}/{archive}`) so no escaping is needed. It is fully derived from the request, which is what lets two users' identical requests land on the same item.
+- [x] **Dedup proven live.** The insert is conditional on `attribute_not_exists(PK)`, so a repeat submit returns `200 {"deduplicated": true}` and enqueues nothing — confirmed by the queue holding exactly **one** message after two identical submits. A check-then-write would have raced here; the conditional write cannot.
+- [x] **`requestedBy` is stored but never returned.** Attribution for debugging, not API surface — returning it would leak one user's activity to another on otherwise public data.
+- [ ] **Worker image not yet rebuilt.** `worker.py` is updated for the new key but Docker was unavailable, so the running image still expects the old message shape. The service is scaled to zero and both queues are empty, so nothing is broken — but the first submit after this needs a rebuilt image or it will fail to the DLQ.
+- [ ] **Decide whether public reads should keep requiring a token.** Currently they do. The argument for keeping it is attribution and rate-limiting; the argument against is that the data is public and Chess.com serves it unauthenticated anyway. Not urgent, but it is now an inconsistency rather than a decision.
+
+**The ownership drills this invalidates.** "Valid token, someone else's game → 404" tested a boundary that no longer exists: analysis is public, so there is no cross-user read to prevent. It is struck from the failure paths below rather than quietly left passing — it would still return 404 for an *absent* player, but that tests spelling, not authorisation.
 
 ## Account linking — the second half of auth
 
@@ -116,22 +142,26 @@ Verified in the Phase 1 code: submit holds `dynamodb:PutItem` + `sqs:SendMessage
 
 Kept in this phase deliberately: the skill assigns no phase to Chess.com ingestion, so there is no later phase that would naturally host this. Deferring it would park it indefinitely, not schedule it.
 
-- [ ] Model linked accounts on the user item — platform, username, and a **verified** flag. Not a separate identity.
+**Built after the re-key**, so it lands on the corrected model rather than being written twice.
+
+- [ ] Model linked accounts as **one item per link**: `PK = USER#<sub>`, `SK = LINK#<platform>`, carrying username, `verified`, and `linkedAt`. One `PutItem` per link with no prior read — a map on a single profile item would need read-modify-write, where two concurrent link flows can silently drop one another.
 - [ ] Lichess OAuth2 PKCE link flow. No client secret by design; the returned identity is trustworthy.
 - [ ] Chess.com placeholder: username stored **unverified** until OAuth approval exists. Decide whether to apply for approval now or leave it.
-- [ ] **Decide what an unverified link permits.** Chess.com data is public, so "unverified still allows analysis" is defensible — but decide it on purpose and record why. Two trust levels in one system is exactly the detail that gets probed.
-- [ ] Decide what happens when a user links an account someone else has already linked.
+- [x] **What an unverified link permits: full analysis.** The Published Data API is public and unauthenticated, so analysing those games needs no proof of ownership — blocking would trade a working feature for a guarantee the data does not require. The `verified` flag still exists, because a *verified* link is what a future feature (say, "my stats" vs "a player I looked up") would key off.
+- [x] **Duplicate links: allowed, because analysis is shared.** Once analysis is keyed by player rather than by user, two users linking the same account is not duplication — they point at one shared partition. Uniqueness enforcement would add a GSI to prevent something that costs nothing.
 
 ## Failure paths
 
 The part most portfolio projects skip, and the part interviews actually probe. Phase 1 set the standard: drills, watched live, not assertions.
 
-- [ ] **No token** → `401` at the gateway, Lambda never invoked. Confirm in the logs, not just the response.
-- [ ] **Expired token** → `401`. Requires deliberately minting a short-lived one.
-- [ ] **Valid token, someone else's game** → `403` or `404`, decided on purpose. Leaking existence via a `403` is a real distinction; pick one and record why.
-- [ ] **Tampered signature** → rejected.
-- [ ] **Token from a different user pool**, correctly signed but wrong issuer → rejected. Checking the signature is not the same as checking who signed it.
-- [ ] **Abandoned OAuth link flow** — user starts a Lichess link and never returns. Confirm no half-written link is left on the user item.
+All run live 17 Aug 2026 against the deployed API. Tokens were obtained by a real SRP login, not minted locally — `ADMIN_USER_PASSWORD_AUTH` is disabled on the client, which the drill confirmed by failing on it first.
+
+- [x] **No token** → `401`, and **0 Lambda invocations** in the logs. Same for `POST` and for a syntactically invalid token.
+- [x] **Expired token** → `401`. Client validity was temporarily dropped to the 5-minute minimum, a token minted, confirmed `200` while valid, then re-sent after expiry for a `401`. Reverted to 1 hour afterwards and verified live.
+- [x] ~~**Valid token, someone else's game** → `404`~~ — **struck.** Passed when analysis was keyed per user, then the product decision made analysis public and shared, which removed the boundary this drill tested. Kept visible rather than deleted: a drill that stops being meaningful is a change in the threat model, and silently dropping it would hide that.
+- [x] **Tampered signature** → `401`. Also drilled the sharper version: payload rewritten to claim a **different `sub`** with the original signature attached — i.e. an attempt to impersonate another user — rejected.
+- [x] **Token from a different user pool** → `401`. A genuinely valid, correctly-signed, unexpired token from a throwaway second pool. Proves the authorizer checks *who signed it*, not merely that it is signed. Throwaway pool deleted afterwards.
+- [ ] **Abandoned OAuth link flow** — user starts a Lichess link and never returns. Confirm no half-written link is left on the user item. *(Belongs to the linking work, not yet built.)*
 
 ## Cost controls
 
@@ -150,6 +180,7 @@ The part most portfolio projects skip, and the part interviews actually probe. P
 | Phase 1 scope | Phase 1 is API GW + Lambda + DynamoDB + budget | Also built SQS, DLQ, Fargate worker, autoscaling | The skill's own Phase 1 brief ("fake worker, full pipeline shape") required it. Pulls work forward from Phases 3 and 6; recorded in the table above so it is not built twice. |
 | Phase 2 scope | "Cognito or JWT, least-privilege IAM, SSM/Secrets Manager" | Also account linking (Lichess OAuth + Chess.com placeholder) | The skill treats identity as one deliverable, but proving *chess* account ownership is a second problem it does not address — it never assigns Chess.com ingestion a phase at all. Linking has no later home, so it ships here. Roughly doubles the phase. |
 | Phase 6 timing | Pulled ahead of 4 and 5 so the VPC lab lands in the SAA study window | Keep the `1 → 2 → 3 → 6` order, but on coherence grounds only | The skill's stated reason for the reordering is the exam window, and cert timing is explicitly not a constraint here (17 Aug 2026). Same order, different justification — recorded so the reasoning does not get re-derived from the skill's premise. |
+| Pipeline changed inside Phase 2 | This file's own rule: "the pipeline does not change" this phase | Re-keyed analysis to `PLAYER#…`, which touches submit, worker and the queue message | A product decision surfaced mid-phase: analysis is public and shared, so keying it per user was wrong. Building linking on the old key would have meant writing it twice. Chosen deliberately over deferring to Phase 3, with the cost acknowledged — Phase 2 no longer holds the "auth only" line, and the ownership drills it invalidates must be replaced rather than dropped. |
 | _(next)_ | | | |
 
 ## Decision log
@@ -166,6 +197,20 @@ Phase 1's decisions are in [PHASE-1.md](PHASE-1.md) and still binding — this t
 | IAM denial drill target | Write to a dedicated `DRILL#iam` key | Mutate a real game item | The table was empty, so a dedicated key proved the same thing with no path to touching real data. It also inverts the evidence usefully: a *broken* boundary leaves a visible stray item rather than silently passing. |
 | `ecr:GetAuthorizationToken` on `*` | Keep it | Try to scope it to the repository ARN | It is a registry-level action with no resource-level ARN — `*` is the only valid value AWS accepts. Scoping is applied to the image-pull actions beside it. Recorded so it is not "fixed" later by someone reading the wildcard rule literally. |
 | `terraform-admin` holds `AdministratorAccess` | Leave it this phase, note it | Tighten to a scoped deploy policy now | Out of scope: the skill's constraint is on the app's roles, which are clean. It is the widest thing in the account and has MFA. A real exercise if wanted later — not Phase 2 work, but recorded so it is a decision rather than an oversight. |
+| Cognito app client type | Public, no secret (PKCE) | Confidential client with a secret | The client is a browser page and a secret shipped to a browser is not a secret. This is what empties the Secrets Manager section — the phase briefly assumed the opposite before the client type was settled. |
+| `terraform/auth/` as its own root | Separate state from `api/` | Add Cognito to the existing api stack | Opposite lifecycles. Handlers redeploy on every code change; a user pool holds real accounts and must not sit one bad destroy away from code being iterated on. Same reasoning that already splits `data`/`queue`/`worker`. |
+| Login auth flow | SRP + refresh only | Also enable `USER_PASSWORD_AUTH` | `USER_PASSWORD_AUTH` sends the raw password to the API. SRP proves knowledge of it without transmitting it, and nothing here needs the simpler flow. |
+| Cognito tier | Lite | Essentials / Plus | Lite covers password sign-in, hosted UI and JWT issuance — the whole phase. The higher tiers add threat protection at a per-MAU price with no failure mode here to justify it. |
+| Password policy | 12 chars, no symbol requirement | Symbols required | Length beats character-class rules for real entropy; symbol requirements mostly produce "Password1!" and a sticky note. |
+| Partition key after auth | `PK = USER#<cognito-sub>` | `PK = USER#<chess-username>` + owner attribute | Keeps both of the skill's access patterns working with no GSI — "list my games" is just a query on the caller's partition. Ownership is enforced by the key itself rather than by a check after the read. Cost: two users analysing the same player store separate items, which is acceptable while the payload is small. |
+| Not-your-game response | `404` | `403` | With the subject in the key, a miss is the natural outcome and leaks nothing. `403` would mean deliberately building a cross-user read in order to refuse it — adding the capability the boundary exists to prevent. |
+| Composite id format | `timestamp-gameId` | Keep `username-timestamp-gameId` | The username is no longer part of the key, so carrying it in the id would be decorative and misleading. The worker gets `userId` from the message body instead. |
+| Throttle after auth | Keep at 10 req/s, re-scoped | Remove it | Its original job (anonymous hammering) is now the authorizer's, done for free at 401. Its remaining job is real: bounding one authenticated caller's blast radius — a runaway poll loop or a compromised account. |
+| Analysis partition key *(supersedes the row above)* | `PK = PLAYER#<platform>#<username>` | `PK = USER#<cognito-sub>` | The earlier row argued the sub-keyed model on enforcing ownership by the key. Analysis turns out to be **public and shared**, so there is no ownership to enforce and the argument does not apply. Keying by player is what makes "no point re-analysing" true: two users asking for the same player reuse one partition. Matches the skill's archive-per-user-month chunking and its ETag cost story. |
+| Link storage shape | One item per link, `SK = LINK#<platform>` | One `PROFILE` item holding a `linkedAccounts` map | A map needs read-modify-write, so two link flows in two tabs can silently drop one another's link. One item per link is a single `PutItem` with no prior read, and listing is a query on the `SK` prefix. |
+| Unverified link permissions | Full analysis allowed | Block until verified; or allow but degrade | Chess.com's Published Data API is public, so ownership proves nothing the data does not already give. Blocking would disable the main input path while waiting on an approval queue that is not ours. |
+| Duplicate links | Allowed | Block, or block only for verified links | Once analysis is keyed by player, two users linking the same account share one partition rather than duplicating anything. Enforcing uniqueness would need a GSI to prevent a non-problem. |
+| Re-key before linking | Re-key analysis first, then build linking | Linking first, re-key in Phase 3 | Linking written against the old key would have to be rewritten immediately after. Cost: Phase 2 breaks its own pipeline rule — recorded in the deviations table. |
 | _(next)_ | | | |
 
 ---

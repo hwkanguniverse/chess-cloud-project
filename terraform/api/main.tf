@@ -82,6 +82,15 @@ data "terraform_remote_state" "queue" {
   }
 }
 
+data "terraform_remote_state" "auth" {
+  backend = "s3"
+  config = {
+    bucket = "chess-cloud-tfstate-961868442307"
+    key    = "auth/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
 locals {
   table_name = data.terraform_remote_state.data.outputs.table_name
   table_arn  = data.terraform_remote_state.data.outputs.table_arn
@@ -153,7 +162,11 @@ resource "aws_iam_role_policy" "submit" {
     Statement = [
       {
         Effect   = "Allow"
-        Action   = ["dynamodb:PutItem"]
+        # GetItem alongside PutItem: the conditional insert fails when the
+        # player-month is already known, and the dedup path then reads the
+        # existing item to report its status back. Still no UpdateItem or
+        # DeleteItem - submit creates, it never mutates.
+        Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
         Resource = local.table_arn
       },
       {
@@ -262,16 +275,49 @@ resource "aws_apigatewayv2_integration" "status" {
   payload_format_version = "2.0"
 }
 
+# --- Authorizer ------------------------------------------------------------
+
+# The lock on the front door. API Gateway validates the JWT itself - signature
+# against the pool's published JWKS, plus issuer, audience and expiry - and
+# rejects with 401 before any integration runs. An unauthenticated request
+# therefore costs zero Lambda invocations, which is the whole reason this is a
+# gateway concern rather than a check at the top of each handler.
+#
+# Note what this does NOT do: it gates the *caller*, not what the functions may
+# touch. The execution roles are unchanged - see the IAM section in CLAUDE.md.
+resource "aws_apigatewayv2_authorizer" "jwt" {
+  api_id           = aws_apigatewayv2_api.api.id
+  authorizer_type  = "JWT"
+  identity_sources = ["$request.header.Authorization"]
+  name             = "cognito"
+
+  jwt_configuration {
+    # The access token's audience is the app client id. Checking it stops a
+    # token minted for some other client of the same pool being replayed here.
+    audience = [data.terraform_remote_state.auth.outputs.user_pool_client_id]
+    issuer   = data.terraform_remote_state.auth.outputs.issuer
+  }
+}
+
 resource "aws_apigatewayv2_route" "submit" {
   api_id    = aws_apigatewayv2_api.api.id
   route_key = "POST /games"
   target    = "integrations/${aws_apigatewayv2_integration.submit.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 }
 
+# Three path segments rather than one opaque id: the analysis id is
+# platform/username/yyyy-mm, and splitting it here means a slash inside the id
+# needs no escaping by the client.
 resource "aws_apigatewayv2_route" "status" {
   api_id    = aws_apigatewayv2_api.api.id
-  route_key = "GET /games/{id}"
+  route_key = "GET /analysis/{platform}/{username}/{archive}"
   target    = "integrations/${aws_apigatewayv2_integration.status.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 }
 
 resource "aws_apigatewayv2_stage" "default" {
@@ -279,9 +325,12 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 
-  # The API is public and unauthenticated until Phase 2. Throttling is the
-  # only thing standing between a scripted hammer and a Lambda bill - the
-  # account default is 10,000 req/s, which at these limits nobody can reach.
+  # Kept after the authorizer landed, with a different job. It no longer guards
+  # against anonymous hammering - the authorizer rejects that at 401 for free.
+  # What is left is a blast radius limit on an *authenticated* caller: a bug in
+  # the client's polling loop, or one compromised account, still cannot run up
+  # a Lambda bill. The account default is 10,000 req/s, so without this the
+  # ceiling is effectively "whatever a script can manage".
   default_route_settings {
     throttling_rate_limit  = 10
     throttling_burst_limit = 20

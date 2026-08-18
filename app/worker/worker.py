@@ -43,19 +43,20 @@ signal.signal(signal.SIGTERM, _on_sigterm)
 
 def process(message):
     body = json.loads(message["Body"])
-    composite_id = body["id"]
+    analysis_id = body["id"]
 
-    # Same parsing rule as the status handler: rsplit("-", 2), because
-    # usernames may contain hyphens and the last two fields never do.
-    username, timestamp, game_id = composite_id.rsplit("-", 2)
-    if not timestamp.isdigit():
-        raise ValueError(f"malformed id: {composite_id}")
+    # The key travels in the message rather than being parsed out of the id.
+    # The unit of work is a player-month: analysis is public and shared, so it
+    # is keyed by the player it describes, not by whoever asked for it.
+    platform = body["platform"]
+    username = body["username"]
+    archive = body["archive"]
 
-    print(f"analysing {composite_id}", flush=True)
+    print(f"analysing {analysis_id}", flush=True)
     time.sleep(10)  # stand-in for Stockfish
 
     table.update_item(
-        Key={"PK": f"USER#{username}", "SK": f"GAME#{timestamp}#{game_id}"},
+        Key={"PK": f"PLAYER#{platform}#{username}", "SK": f"ARCHIVE#{archive}"},
         UpdateExpression="SET #s = :s, #r = :r, analysedAt = :t",
         ExpressionAttributeNames={"#s": "status", "#r": "result"},
         ExpressionAttributeValues={
