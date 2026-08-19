@@ -386,13 +386,20 @@ resource "aws_apigatewayv2_route" "submit" {
 # Three path segments rather than one opaque id: the analysis id is
 # platform/username/yyyy-mm, and splitting it here means a slash inside the id
 # needs no escaping by the client.
+#
+# Deliberately unauthenticated. Analysis results are public - the product is
+# looking at any player's skill across many games, so anyone may read anyone's
+# profile. Requiring a token would have been security theatre: the underlying
+# data comes from Chess.com's Published Data API, which serves it to anyone
+# without a token, so a lock here protects nothing that is not already open.
+#
+# What still bounds it is the stage throttle, which is now the only limit on
+# this route. That is the trade being made knowingly: reads are cheap, the
+# data is public, and 10 req/s caps what any one caller can cost.
 resource "aws_apigatewayv2_route" "status" {
   api_id    = aws_apigatewayv2_api.api.id
   route_key = "GET /analysis/{platform}/{username}/{archive}"
   target    = "integrations/${aws_apigatewayv2_integration.status.id}"
-
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 }
 
 resource "aws_apigatewayv2_integration" "link" {
@@ -457,12 +464,12 @@ resource "aws_apigatewayv2_stage" "default" {
   name        = "$default"
   auto_deploy = true
 
-  # Kept after the authorizer landed, with a different job. It no longer guards
-  # against anonymous hammering - the authorizer rejects that at 401 for free.
-  # What is left is a blast radius limit on an *authenticated* caller: a bug in
-  # the client's polling loop, or one compromised account, still cannot run up
-  # a Lambda bill. The account default is 10,000 req/s, so without this the
-  # ceiling is effectively "whatever a script can manage".
+  # Two jobs now, both real. On the authenticated routes it bounds one
+  # caller's blast radius: a runaway polling loop or a compromised account
+  # cannot run up a Lambda bill. On the public read route it is the *only*
+  # limit, since anyone may call that without a token - which is the trade
+  # accepted when analysis became public. The account default is 10,000 req/s,
+  # so without this the ceiling is "whatever a script can manage".
   default_route_settings {
     throttling_rate_limit  = 10
     throttling_burst_limit = 20

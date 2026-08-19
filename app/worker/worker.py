@@ -1,9 +1,14 @@
-"""Phase 1 fake worker: the consumer end of the pipeline.
+"""Fake worker: the consumer end of the pipeline.
 
 Receives a message, sleeps 10 seconds, writes a hardcoded result, marks the
-game COMPLETE, deletes the message. Nothing more - the sleep is a stand-in
-for Stockfish so that any breakage in this phase is AWS plumbing, never AWS
-plumbing and chess at once.
+archive COMPLETE, deletes the message. Nothing more - the sleep is a stand-in
+for Stockfish so that any breakage here is AWS plumbing, never AWS plumbing
+and chess at once.
+
+The unit of work is a player-month, not a game. Analysis is public and shared,
+so it is keyed by the player it describes rather than by whoever asked for it -
+which is what makes re-analysing a player someone else already ran unnecessary
+rather than merely wasteful.
 
 Ordering is the part that matters: the result is written BEFORE the message
 is deleted. Crash between the two and the message reappears after the

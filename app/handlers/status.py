@@ -4,12 +4,15 @@ The client polls this after a submit. One GetItem, no index, no scan - the id
 carries both halves of the primary key, which is the whole reason it looks the
 way it does.
 
-Analysis is public: anyone may read any player's results. That is a product
+Analysis is public and this route is unauthenticated. That is a product
 decision, not an oversight - the point of the app is looking at a player's
-skill across many games, and Chess.com's Published Data API is public anyway,
-so there is nothing here that was not already readable upstream. The route
-still sits behind the authorizer (see CLAUDE.md) so that reads are attributable
-and rate-limited, but the *response* does not depend on who is asking.
+skill across many games, so anyone may read anyone's profile. The underlying
+data comes from Chess.com's Published Data API, which serves it without a
+token, so requiring one here would protect nothing that is not already open.
+
+Consequences worth knowing: reads are not attributable to a user, and the
+stage throttle is the only thing bounding this route. Both are accepted - see
+the decision log in CLAUDE.md.
 """
 
 import json
