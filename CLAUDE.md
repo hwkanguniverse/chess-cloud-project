@@ -144,9 +144,11 @@ Kept in this phase deliberately: the skill assigns no phase to Chess.com ingesti
 
 **Built after the re-key**, so it lands on the corrected model rather than being written twice.
 
-- [ ] Model linked accounts as **one item per link**: `PK = USER#<sub>`, `SK = LINK#<platform>`, carrying username, `verified`, and `linkedAt`. One `PutItem` per link with no prior read — a map on a single profile item would need read-modify-write, where two concurrent link flows can silently drop one another.
-- [ ] Lichess OAuth2 PKCE link flow. No client secret by design; the returned identity is trustworthy.
-- [ ] Chess.com placeholder: username stored **unverified** until OAuth approval exists. Decide whether to apply for approval now or leave it.
+- [x] **Linked accounts modelled as one item per link** — `PK = USER#<sub>`, `SK = LINK#<platform>`, carrying username, `verified`, `linkedAt`. Listing is one query on the `SK` prefix. Built in `app/handlers/link.py` with its own Lambda and role.
+- [x] **Lichess OAuth2 PKCE flow built.** No client secret and, as it turns out, **no registration either** — Lichess accepts an arbitrary `client_id` for public PKCE clients, verified against the live authorize endpoint. `POST /link/lichess` returns an authorize URL; Lichess responds `303` to it, so the request is well-formed. Scope is deliberately empty: reading the account's own username needs no permission, and asking for more would widen the blast radius of a leaked token for nothing.
+- [x] **Chess.com placeholder built.** `POST /link/chesscom` stores the username with `verified: false` and says so in the response. No approval applied for — the feature works without it, so applying would be optimism rather than need. Revisit only if a feature appears that genuinely requires a verified Chess.com link.
+
+**The callback is the only unauthenticated route in the API, and that is not a gap.** Lichess redirects the user's *browser* back, and a redirect carries no `Authorization` header — there is no token to present. The OAuth `state` stands in for it: 32 bytes of entropy this API generated and stored against the user's own partition moments earlier, so holding a valid one is itself proof of who is returning. Single-use (deleted on success), 10-minute expiry. Drilled: a forged state returns "link expired" and **zero outbound calls to Lichess** — an attacker cannot even use it to make this API hammer someone else's server.
 - [x] **What an unverified link permits: full analysis.** The Published Data API is public and unauthenticated, so analysing those games needs no proof of ownership — blocking would trade a working feature for a guarantee the data does not require. The `verified` flag still exists, because a *verified* link is what a future feature (say, "my stats" vs "a player I looked up") would key off.
 - [x] **Duplicate links: allowed, because analysis is shared.** Once analysis is keyed by player rather than by user, two users linking the same account is not duplication — they point at one shared partition. Uniqueness enforcement would add a GSI to prevent something that costs nothing.
 
@@ -161,7 +163,9 @@ All run live 17 Aug 2026 against the deployed API. Tokens were obtained by a rea
 - [x] ~~**Valid token, someone else's game** → `404`~~ — **struck.** Passed when analysis was keyed per user, then the product decision made analysis public and shared, which removed the boundary this drill tested. Kept visible rather than deleted: a drill that stops being meaningful is a change in the threat model, and silently dropping it would hide that.
 - [x] **Tampered signature** → `401`. Also drilled the sharper version: payload rewritten to claim a **different `sub`** with the original signature attached — i.e. an attempt to impersonate another user — rejected.
 - [x] **Token from a different user pool** → `401`. A genuinely valid, correctly-signed, unexpired token from a throwaway second pool. Proves the authorizer checks *who signed it*, not merely that it is signed. Throwaway pool deleted afterwards.
-- [ ] **Abandoned OAuth link flow** — user starts a Lichess link and never returns. Confirm no half-written link is left on the user item. *(Belongs to the linking work, not yet built.)*
+- [x] **Abandoned OAuth link flow** → nothing half-written. Two Lichess flows were started and never completed; the table held two `OAUTH#<state>` items and **no `LINK#lichess`**. The link only exists once Lichess vouches for the username, so an abandoned flow leaves inert state that DynamoDB TTL sweeps on `expiresAt`.
+- [x] **Expired state is rejected by the handler, not by the sweep.** TTL deletion is asynchronous and can lag ~48h, so a stale item may still be present. Drilled by planting an item expiring in 2001: the callback returned "link expired" and made no token exchange. Trusting TTL for correctness would have been the bug here.
+- [x] **Forged state** → "link expired", and **0 outbound calls to Lichess** confirmed in the logs.
 
 ## Cost controls
 
@@ -211,6 +215,11 @@ Phase 1's decisions are in [PHASE-1.md](PHASE-1.md) and still binding — this t
 | Unverified link permissions | Full analysis allowed | Block until verified; or allow but degrade | Chess.com's Published Data API is public, so ownership proves nothing the data does not already give. Blocking would disable the main input path while waiting on an approval queue that is not ours. |
 | Duplicate links | Allowed | Block, or block only for verified links | Once analysis is keyed by player, two users linking the same account share one partition rather than duplicating anything. Enforcing uniqueness would need a GSI to prevent a non-problem. |
 | Re-key before linking | Re-key analysis first, then build linking | Linking first, re-key in Phase 3 | Linking written against the old key would have to be rewritten immediately after. Cost: Phase 2 breaks its own pipeline rule — recorded in the deviations table. |
+| OAuth callback host | API-hosted `GET /link/lichess/callback` | Client-side exchange in a future frontend | There is no frontend yet and the skill caps it at "a page that posts and polls". An API-hosted callback is testable today; a client-side one would have left the exchange unbuilt and the abandoned-flow drill notional. |
+| Callback route unauthenticated | Yes, guarded by OAuth `state` | Try to require a JWT on the callback | A browser redirect cannot carry an `Authorization` header, so requiring one would make the flow impossible. The `state` is server-generated, single-use, short-lived and stored against the user — it is the credential for this hop. |
+| Pending OAuth state storage | Same table, `SK = OAUTH#<state>`, DynamoDB TTL on `expiresAt` | A separate short-lived table | One more item type with a TTL versus a second table to manage. The TTL is also what makes the abandoned-flow guarantee structural rather than a cleanup job. |
+| Lichess client registration | None — arbitrary `client_id` | Register an application first | Verified live: Lichess accepts any `client_id` for public PKCE clients and responds `303`. Pre-registration would have been ceremony with no effect. |
+| Chess.com OAuth approval | Do not apply | Apply now so approval is in flight | The feature works unverified because the Published Data API is public. Applying would be optimism, not need — revisit if a feature ever requires a *verified* Chess.com link. |
 | _(next)_ | | | |
 
 ---
