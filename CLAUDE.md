@@ -4,6 +4,8 @@
 
 **Auth is completed in this phase, not split across two.** Cognito login and account linking ship together — see the auth model below for why they are separable problems but a single phase.
 
+**Status: built and drilled, with one hop outstanding.** Everything in this file is ticked except the Lichess token exchange, which cannot be tested without a human approving on lichess.org and a frontend for the callback to land in. It carries forward as the first thing to verify once a UI exists — not as unfinished work, but as the one claim this phase cannot make on its own evidence.
+
 **The rule that makes this phase work:** the pipeline does not change. No new services in the data path, no touching the worker, no chess. Phase 1's plumbing stays exactly as it is and gains a front door with a lock. If a change would alter how a message flows from submit to `COMPLETE`, it belongs to a later phase.
 
 Phase 1 is complete and its checklist is preserved in [PHASE-1.md](PHASE-1.md) — read it for the decisions already made, do not redo them.
@@ -146,6 +148,7 @@ Kept in this phase deliberately: the skill assigns no phase to Chess.com ingesti
 
 - [x] **Linked accounts modelled as one item per link** — `PK = USER#<sub>`, `SK = LINK#<platform>`, carrying username, `verified`, `linkedAt`. Listing is one query on the `SK` prefix. Built in `app/handlers/link.py` with its own Lambda and role.
 - [x] **Lichess OAuth2 PKCE flow built.** No client secret and, as it turns out, **no registration either** — Lichess accepts an arbitrary `client_id` for public PKCE clients, verified against the live authorize endpoint. `POST /link/lichess` returns an authorize URL; Lichess responds `303` to it, so the request is well-formed. Scope is deliberately empty: reading the account's own username needs no permission, and asking for more would widen the blast radius of a leaked token for nothing.
+- [ ] **The token exchange itself is the one hop never run end to end.** It sits behind a human approving on lichess.org, which is the point of the flow — no automation should be able to complete it, or the link would prove nothing. Deferred deliberately until the UI exists (decided 19 Aug 2026), because the callback redirects into a frontend that is not built yet. Everything either side of that hop *is* drilled: the authorize URL is well-formed and Lichess accepts it, and the callback correctly rejects forged, expired and missing state. What remains unproven is `POST /api/token` and the account lookup — so a failure there is expected information, not a mistake. The handler logs `lichess exchange failed: …` to `/aws/lambda/chess-cloud-link`, which is where to look first.
 - [x] **Chess.com placeholder built.** `POST /link/chesscom` stores the username with `verified: false` and says so in the response. No approval applied for — the feature works without it, so applying would be optimism rather than need. Revisit only if a feature appears that genuinely requires a verified Chess.com link.
 
 **The callback is the only unauthenticated route in the API, and that is not a gap.** Lichess redirects the user's *browser* back, and a redirect carries no `Authorization` header — there is no token to present. The OAuth `state` stands in for it: 32 bytes of entropy this API generated and stored against the user's own partition moments earlier, so holding a valid one is itself proof of who is returning. Single-use (deleted on success), 10-minute expiry. Drilled: a forged state returns "link expired" and **zero outbound calls to Lichess** — an attacker cannot even use it to make this API hammer someone else's server.
@@ -167,12 +170,21 @@ All run live 17 Aug 2026 against the deployed API. Tokens were obtained by a rea
 - [x] **Expired state is rejected by the handler, not by the sweep.** TTL deletion is asynchronous and can lag ~48h, so a stale item may still be present. Drilled by planting an item expiring in 2001: the callback returned "link expired" and made no token exchange. Trusting TTL for correctness would have been the bug here.
 - [x] **Forged state** → "link expired", and **0 outbound calls to Lichess** confirmed in the logs.
 
+## Carried forward to the UI
+
+Not Phase 2 work, but decided here and easy to lose. The skill caps the frontend at "a page that posts and polls", so this is a short list, not a project.
+
+- **Verify the Lichess exchange** (above). First thing to do once a page exists.
+- **Two different callback URLs are in play, and they are not the same thing.** Cognito's `callback_url` is `http://localhost:3000/callback` — where the *hosted UI* returns a user after login, and the one that must change when the page is really hosted. Lichess's redirect points at the live API (`/link/lichess/callback`) and does **not** move, because the API completes that exchange itself. Confusing the two is the obvious way to break login while trying to fix linking.
+- **The page needs the pool id and client id**, both non-secret and both Terraform outputs in `terraform/auth/`. The client id appearing in a login URL is by design, not a leak.
+- **Reads need no token; writes do.** A page can show any player's analysis to a signed-out visitor, but submitting or linking must send `Authorization: Bearer`.
+
 ## Cost controls
 
-- [ ] Confirm Cognito stays free at this scale — the free tier is 50,000 MAU for user-pool sign-ins, which a personal project will not approach. Verify the current figure rather than trusting this line.
-- [ ] If Secrets Manager is chosen over SSM SecureString, that is ~$0.40/secret/month — small, but it is the first recurring charge this project has taken on. Justify it or use Parameter Store.
-- [ ] Re-run `scripts/check-drift.sh` after each apply.
-- [ ] Month-to-date spend still ~zero via the Budgets API — free to query, unlike Cost Explorer at $0.01/call.
+- [x] **Cognito costs nothing here.** The Lite tier's free allowance is far above anything a personal project reaches, and the pool currently holds zero users between tests. Two different free-tier figures circulated while building this (10,000 and 50,000 MAU) — the number depends on the tier and has changed with Cognito's 2024 repricing, so **check the current pricing page before quoting it anywhere**, rather than trusting either figure in this file. What matters for the cost story is the shape: user pools are free at personal scale and bill per monthly active user above it.
+- [x] **Secrets Manager was never adopted, so it costs nothing.** The ~$0.40/secret/month would have been this project's first recurring charge; the public PKCE client means there is no secret to store. Recorded so the charge is not reintroduced by habit.
+- [x] **`scripts/check-drift.sh` re-run after every apply this phase**, including after the Cognito build, the authorizer, the re-key, the linking stack and the public-read change. Clean each time.
+- [x] **Month-to-date spend is $0.00** against the $5 budget, confirmed via the Budgets API (free to query, unlike Cost Explorer at $0.01/call). Everything added this phase — Cognito, one more Lambda, four more routes, a TTL — sits inside the always-free tiers.
 
 ---
 
@@ -222,6 +234,7 @@ Phase 1's decisions are in [PHASE-1.md](PHASE-1.md) and still binding — this t
 | Chess.com OAuth approval | Do not apply | Apply now so approval is in flight | The feature works unverified because the Published Data API is public. Applying would be optimism, not need — revisit if a feature ever requires a *verified* Chess.com link. |
 | Worker image tagging | Keep the mutable `latest` tag for now | Immutable tags (git SHA) with a Terraform-tracked digest | Noted as a real limitation, not defended: with `latest`, nothing records which build is running, `terraform apply` cannot detect a new image, and there is no previous tag to roll back to — the re-key push left the old image untagged, which is exactly the failure shape. Acceptable for a solo project where the push is manual and immediately verified. The honest fix belongs with the Phase 5 CI work (GitHub Actions + OIDC), where a build already has a commit SHA to tag with. |
 | Reads unauthenticated | `GET /analysis/…` needs no token | Keep the JWT authorizer on reads for attribution and rate-limiting | Analysis is public by product decision, and the upstream source (Chess.com's Published Data API) serves the same data without a token — so a lock here protected nothing that was not already open. Attribution was the only real argument for keeping it, and `requestedBy` on the submit already records who asked for an analysis to exist. Cost accepted: reads are no longer attributable to a user, and the stage throttle is the only bound on that route. |
+| Lichess exchange left untested | Defer until the UI exists | Test it now by creating an account and approving manually | The hop requires a human on lichess.org by design, and the callback redirects into a frontend that does not exist. Testing it now would have meant creating a real user and a throwaway Lichess account to prove one HTTP call, then deleting both. Deferring costs nothing as long as it is *recorded* — an untested path that nobody has written down is the actual risk, not an untested path. |
 | _(next)_ | | | |
 
 ---
