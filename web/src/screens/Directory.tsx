@@ -65,7 +65,7 @@ export default function Directory() {
           <tr>
             <th>Player</th>
             <th className="num">Games</th>
-            <th className="num">Months</th>
+            <th></th>
             <th className="num">Analysed</th>
           </tr>
         </thead>
@@ -78,10 +78,17 @@ export default function Directory() {
                 </Link>
               </td>
               <td className="num">{player.games.toLocaleString()}</td>
-              <td className="num">
-                {player.complete}/{player.months}
+              {/* Progress as a share of the work, not a month count - the
+                  archive is the worker's unit and stays out of the product. */}
+              <td>
                 {player.pending > 0 && (
-                  <span className="pending"> · {player.pending} pending</span>
+                  <span className="pending small">
+                    ingesting —{" "}
+                    {Math.round(
+                      (player.complete / Math.max(player.months, 1)) * 100,
+                    )}
+                    %
+                  </span>
                 )}
               </td>
               <td className="num muted">{ago(player.lastAnalysedAt)}</td>

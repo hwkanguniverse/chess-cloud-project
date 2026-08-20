@@ -160,8 +160,16 @@ export function outcomeOf(result: string): "win" | "draw" | "loss" {
 }
 
 /**
- * The month route returns the stored item as-is (minus the keys), so this is
- * a superset of Month with the games attached.
+ * One archive with its games attached.
+ *
+ * The month is a storage and worker concept, not a product one - the UI shows
+ * a player's games as one continuous list. This type exists because the month
+ * is still the *fetch* unit: games are stored one item per archive (which is
+ * what keeps an 828-game month inside a 400KB item), so the games list pages
+ * by walking archives newest-first rather than by an offset.
+ *
+ * That is the whole of the compromise. The user never sees an archive; the
+ * network tab does.
  */
 export interface MonthDetail {
   id: string;

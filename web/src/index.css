@@ -258,6 +258,30 @@ a {
   background: var(--surface);
 }
 
+/* --- Load more ------------------------------------------------------------ */
+
+.load-more {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 2rem 0;
+}
+
+.load-more button {
+  padding: 0.55rem 1.5rem;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  cursor: pointer;
+}
+
+.load-more button:hover {
+  border-color: var(--muted);
+}
+
 /* --- Badges --------------------------------------------------------------- */
 
 .pill {
