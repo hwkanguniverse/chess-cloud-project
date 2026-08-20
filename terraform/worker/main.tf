@@ -354,7 +354,32 @@ resource "aws_appautoscaling_target" "worker" {
   resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.worker.name}"
   scalable_dimension = "ecs:service:DesiredCount"
   min_capacity       = 0 # the load-bearing number in the whole file
-  max_capacity       = 1 # one task drains any Phase 1 backlog; parallelism is a Phase 4 tuning knob
+
+  # NOT a tuning knob, and not a number to raise on intuition.
+  #
+  # Chess.com's rule is "serial access is unlimited; parallel requests may
+  # return 429". That is phrased per *caller*, not per player - so it is not
+  # established that splitting work by username would make concurrency safe.
+  # Two workers on different players are still two of our requests overlapping
+  # in time, which is the thing the rule appears to prohibit.
+  #
+  # So: one task is the only configuration known to comply. The safe
+  # concurrency, if any, is unknown.
+  #
+  # Establishing the real limit is a prerequisite to raising this - not an
+  # optimisation to attempt first. The cheapest way is to ask, using the
+  # contact address already in our User-Agent (that is what it is for); the
+  # developer community is the right channel. Measuring is weak evidence in
+  # the wrong direction: absence of a 429 at concurrency 2 for a few minutes
+  # does not prove it is safe sustained, and the failure mode is an IP ban
+  # that breaks the product for every user and cannot be bought back the way
+  # a bill can.
+  #
+  # If the limit turns out to be per-player, SQS FIFO with MessageGroupId =
+  # username is *a* mechanism to enforce it - one in-flight message per group.
+  # That is a tool for a constraint we have not confirmed, not the answer.
+  # See PHASE-F.md.
+  max_capacity = 1
 }
 
 resource "aws_appautoscaling_policy" "scale_out" {
