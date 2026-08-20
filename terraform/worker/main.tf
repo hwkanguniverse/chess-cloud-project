@@ -55,6 +55,18 @@ variable "image_tag" {
   default     = "latest"
 }
 
+variable "chesscom_user_agent" {
+  description = <<-EOT
+    Sent on every request to Chess.com's Published Data API. The API is free
+    and unauthenticated, so this header is the only thing identifying us: they
+    use it to make contact before blocking an IP. A missing or anonymous UA is
+    the difference between an email and a ban, which is why it is configuration
+    rather than an optional nicety. Keep it in step with the API root's copy.
+  EOT
+  type        = string
+  default     = "chess-cloud-project/0.1 (learning project; wenkang.hoo@gmail.com)"
+}
+
 variable "scale_in_minutes" {
   description = <<-EOT
     How long the queue must sit empty before the worker scales to zero.
@@ -237,8 +249,14 @@ resource "aws_iam_role_policy" "task" {
         Resource = local.queue_arn
       },
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:UpdateItem"]
+        Effect = "Allow"
+        # GetItem alongside UpdateItem: the worker reads the item before
+        # fetching, because the stored ETag is the only record that a previous
+        # fetch happened and the worker holds no state between messages. That
+        # read is what makes a conditional request possible, so without this
+        # permission every message fails - and fails *generically*, retrying
+        # five times into the DLQ as though Chess.com were down.
+        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
         Resource = local.table_arn
       },
     ]
@@ -262,10 +280,15 @@ resource "aws_ecs_task_definition" "worker" {
   family                   = "chess-cloud-worker"
   requires_compatibilities = ["FARGATE"]
   network_mode             = "awsvpc"
-  cpu                      = 256 # 0.25 vCPU, the smallest Fargate size -
-  memory                   = 512 # plenty for a sleep loop; revisit for Stockfish
-  execution_role_arn       = aws_iam_role.execution.arn
-  task_role_arn            = aws_iam_role.task.arn
+  # 0.25 vCPU / 0.5 GB, the smallest Fargate size. Still right for real
+  # ingestion: the work is one HTTP request and one write per message, so it is
+  # I/O-bound, not CPU-bound. The largest month measured is 3.4MB on the wire
+  # and 145KB stored, well inside 512MB. Revisit for Stockfish, which is the
+  # first thing here that will actually want CPU.
+  cpu                = 256
+  memory             = 512
+  execution_role_arn = aws_iam_role.execution.arn
+  task_role_arn      = aws_iam_role.task.arn
 
   container_definitions = jsonencode([
     {
@@ -278,6 +301,10 @@ resource "aws_ecs_task_definition" "worker" {
         # boto3 discovers credentials from the task role automatically, but
         # not the region - ECS does not inject one.
         { name = "AWS_DEFAULT_REGION", value = var.region },
+        # Chess.com's API is unauthenticated, so this header is the only thing
+        # identifying us to them. They use it to make contact before blocking
+        # an IP, which is why it is configuration rather than a nicety.
+        { name = "CHESSCOM_USER_AGENT", value = var.chesscom_user_agent },
       ]
       logConfiguration = {
         logDriver = "awslogs"

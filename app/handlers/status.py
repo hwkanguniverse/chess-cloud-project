@@ -1,8 +1,13 @@
-"""Status handler: the read half of the front door.
+"""Status handler: one month, with its games.
 
-The client polls this after a submit. One GetItem, no index, no scan - the id
-carries both halves of the primary key, which is the whole reason it looks the
-way it does.
+The narrow read. Submit takes a username and fans out into ~200 months, so
+what a client polls after submitting is the *player* route - see player.py,
+which lists every month with its status and cumulative totals. This route is
+what that page drills into: a single player-month, including the per-game
+summary rows the player route deliberately projects away.
+
+One GetItem, no index, no scan - the id carries both halves of the primary
+key, which is the whole reason it looks the way it does.
 
 Analysis is public and this route is unauthenticated. That is a product
 decision, not an oversight - the point of the app is looking at a player's

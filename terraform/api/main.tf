@@ -1,11 +1,19 @@
-# Front door: an API Gateway HTTP API in front of two thin Lambdas.
+# Front door: an API Gateway HTTP API in front of thin Lambdas.
 #
-#   POST /games       -> submit: write PENDING item, queue a message, 202
-#   GET  /games/{id}  -> status: one GetItem, the URL the client polls
+#   POST /games                                  -> submit: resolve the player's
+#                                                   archives, claim and queue one
+#                                                   message per month, 202
+#   GET  /player/{platform}/{username}           -> player: every month for a
+#                                                   player plus cumulative totals
+#   GET  /analysis/{platform}/{username}/{month} -> status: one month, with games
 #
-# Neither function does real work. Analysis takes 30-90s and API Gateway caps
-# every request at 29s regardless of Lambda's own timeout - the queue is what
-# that ceiling forces.
+# No function does real work. Fetching and counting a month happens on the
+# worker, and API Gateway caps every request at 29s regardless of Lambda's own
+# timeout - the queue is what that ceiling forces.
+#
+# Submit is the one that is no longer trivially fast: it makes an outbound call
+# to Chess.com to resolve the archive list, then claims up to ~150 months. See
+# its timeout below.
 #
 # HTTP API, not REST API: same job at ~$1/M requests instead of ~$3.50/M. The
 # REST-only extras (API keys, usage plans, response caching) have no consumer
@@ -54,13 +62,40 @@ variable "region" {
 
 variable "lambda_timeout" {
   description = <<-EOT
-    Both handlers do sub-second work (one DynamoDB call, one SQS call); the
-    timeout only bounds a hung dependency. 10s covers a cold start plus one
-    slow SDK retry, while failing a genuinely hung call long before the
-    gateway's 29s cap would make the client wait for the same bad news.
+    The read handlers do sub-second work (one DynamoDB call); the timeout only
+    bounds a hung dependency. 10s covers a cold start plus one slow SDK retry,
+    while failing a genuinely hung call long before the gateway's 29s cap would
+    make the client wait for the same bad news.
   EOT
   type        = number
   default     = 10
+}
+
+variable "chesscom_user_agent" {
+  description = <<-EOT
+    Sent on every request to Chess.com's Published Data API. The API is free
+    and unauthenticated, so this header is the only thing identifying us: they
+    use it to make contact before blocking an IP. A missing or anonymous UA is
+    the difference between an email and a ban, which is why it is configuration
+    rather than an optional nicety.
+  EOT
+  type        = string
+  default     = "chess-cloud-project/0.1 (learning project; wenkang.hoo@gmail.com)"
+}
+
+variable "submit_timeout" {
+  description = <<-EOT
+    Submit is no longer a two-call function. It fetches the player's archive
+    list from Chess.com, then performs one conditional write per month - up to
+    ~150 for a long-lived account - before batching the queue sends ten at a
+    time. Those writes are sequential, so the wall clock is real.
+
+    20s leaves headroom for a cold start plus a slow upstream, and still fails
+    inside the gateway's 29s cap: past that the client gets a 504 regardless,
+    so a longer timeout would only burn Lambda time for news nobody receives.
+  EOT
+  type        = number
+  default     = 20
 }
 
 # The table and queue live in their own roots; their outputs are the contract.
@@ -122,6 +157,12 @@ data "archive_file" "link" {
   output_path = "${path.module}/build/link.zip"
 }
 
+data "archive_file" "player" {
+  type        = "zip"
+  source_file = "${local.handlers_dir}/player.py"
+  output_path = "${path.module}/build/player.zip"
+}
+
 # --- Logs ------------------------------------------------------------------
 # Created explicitly rather than letting Lambda auto-create them: auto-created
 # groups keep logs forever (a slow cost leak), and a pre-existing group is
@@ -139,6 +180,11 @@ resource "aws_cloudwatch_log_group" "link" {
 
 resource "aws_cloudwatch_log_group" "status" {
   name              = "/aws/lambda/chess-cloud-status"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "player" {
+  name              = "/aws/lambda/chess-cloud-player"
   retention_in_days = 14
 }
 
@@ -172,17 +218,22 @@ resource "aws_iam_role_policy" "submit" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        # GetItem alongside PutItem: the conditional insert fails when the
-        # player-month is already known, and the dedup path then reads the
-        # existing item to report its status back. Still no UpdateItem or
-        # DeleteItem - submit creates, it never mutates.
-        Action   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+        Effect = "Allow"
+        # UpdateItem rather than PutItem, and the distinction is load-bearing:
+        # PutItem replaces an item wholesale, so re-claiming a FAILED month
+        # would erase its stored ETag and force a full re-download of an
+        # archive that had not changed. Setting named attributes preserves it.
+        # Still no DeleteItem - submit creates and re-claims, it never removes.
+        Action   = ["dynamodb:UpdateItem"]
         Resource = local.table_arn
       },
       {
-        Effect   = "Allow"
-        Action   = ["sqs:SendMessage"]
+        Effect = "Allow"
+        # SendMessageBatch is a separate IAM action from SendMessage, not a
+        # variant of it - granting only the latter fails every fan-out with
+        # AccessDenied. Both are listed because the batch call is what submit
+        # uses now and the single call is one refactor away from returning.
+        Action   = ["sqs:SendMessage", "sqs:SendMessageBatch"]
         Resource = local.queue_arn
       },
       {
@@ -230,6 +281,35 @@ resource "aws_iam_role_policy" "link" {
   })
 }
 
+resource "aws_iam_role" "player" {
+  name               = "chess-cloud-player"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "player" {
+  name = "player"
+  role = aws_iam_role.player.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        # Query, not GetItem: every month for a player shares one partition
+        # key, so the whole history is a single Query against the primary key.
+        # No Scan, and no index - the read this layout was chosen for.
+        Action   = ["dynamodb:Query"]
+        Resource = local.table_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.player.arn}:*"
+      },
+    ]
+  })
+}
+
 resource "aws_iam_role" "status" {
   name               = "chess-cloud-status"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
@@ -267,12 +347,16 @@ resource "aws_lambda_function" "submit" {
 
   runtime = "python3.13"
   handler = "submit.handler"
-  timeout = var.lambda_timeout
+  timeout = var.submit_timeout
 
   environment {
     variables = {
       TABLE_NAME = local.table_name
       QUEUE_URL  = local.queue_url
+      # Chess.com's API is unauthenticated, so this header is the only thing
+      # identifying us to them. Set here rather than hardcoded so the contact
+      # address can change without a code deploy.
+      CHESSCOM_USER_AGENT = var.chesscom_user_agent
     }
   }
 
@@ -307,6 +391,26 @@ resource "aws_lambda_function" "link" {
   }
 
   depends_on = [aws_cloudwatch_log_group.link]
+}
+
+resource "aws_lambda_function" "player" {
+  function_name = "chess-cloud-player"
+  role          = aws_iam_role.player.arn
+
+  filename         = data.archive_file.player.output_path
+  source_code_hash = data.archive_file.player.output_base64sha256
+
+  runtime = "python3.13"
+  handler = "player.handler"
+  timeout = var.lambda_timeout
+
+  environment {
+    variables = {
+      TABLE_NAME = local.table_name
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.player]
 }
 
 resource "aws_lambda_function" "status" {
@@ -347,6 +451,13 @@ resource "aws_apigatewayv2_integration" "status" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.status.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_integration" "player" {
+  api_id                 = aws_apigatewayv2_api.api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.player.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -400,6 +511,22 @@ resource "aws_apigatewayv2_route" "status" {
   api_id    = aws_apigatewayv2_api.api.id
   route_key = "GET /analysis/{platform}/{username}/{archive}"
   target    = "integrations/${aws_apigatewayv2_integration.status.id}"
+}
+
+# The route submit points a client at. Since submit fans a username out into
+# ~150 independent months, this is what makes the job legible: one Query
+# returns every month with its own status plus cumulative totals over the ones
+# that are done, so a partial history reads as progress rather than absence.
+#
+# It returns per-month summaries but not the games - 152 months of games would
+# be tens of megabytes. Drilling into a month is what the status route above is
+# for, which is why both exist.
+#
+# Unauthenticated for the same reason as the status route: analysis is public.
+resource "aws_apigatewayv2_route" "player" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /player/{platform}/{username}"
+  target    = "integrations/${aws_apigatewayv2_integration.player.id}"
 }
 
 resource "aws_apigatewayv2_integration" "link" {
@@ -494,7 +621,19 @@ resource "aws_lambda_permission" "status" {
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
 }
 
+resource "aws_lambda_permission" "player" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.player.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
 output "api_endpoint" {
-  description = "Base URL. POST /games to submit, GET /games/{id} to poll."
+  description = <<-EOT
+    Base URL. POST /games with {"username": "..."} to submit a whole player,
+    GET /player/{platform}/{username} to poll, and
+    GET /analysis/{platform}/{username}/{yyyy-mm} for one month with its games.
+  EOT
   value       = aws_apigatewayv2_api.api.api_endpoint
 }
