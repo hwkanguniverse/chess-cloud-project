@@ -98,6 +98,24 @@ variable "submit_timeout" {
   default     = 20
 }
 
+variable "allowed_origins" {
+  description = <<-EOT
+    Origins the browser app is served from. Only these may call the API with
+    JavaScript - a wildcard would let any site on the internet make requests
+    using a signed-in user's browser, which the public reads survive but
+    POST /games does not.
+
+    A list rather than a single value on purpose: the app runs on localhost in
+    development, on the CloudFront URL once deployed, and on a custom domain
+    after that. All three can be present at once, so adding a domain never
+    means a window where the live origin has been swapped out.
+  EOT
+  type        = list(string)
+  default = [
+    "http://localhost:5173",
+  ]
+}
+
 # The table and queue live in their own roots; their outputs are the contract.
 data "terraform_remote_state" "data" {
   backend = "s3"
@@ -163,6 +181,12 @@ data "archive_file" "player" {
   output_path = "${path.module}/build/player.zip"
 }
 
+data "archive_file" "players" {
+  type        = "zip"
+  source_file = "${local.handlers_dir}/players.py"
+  output_path = "${path.module}/build/players.zip"
+}
+
 # --- Logs ------------------------------------------------------------------
 # Created explicitly rather than letting Lambda auto-create them: auto-created
 # groups keep logs forever (a slow cost leak), and a pre-existing group is
@@ -185,6 +209,11 @@ resource "aws_cloudwatch_log_group" "status" {
 
 resource "aws_cloudwatch_log_group" "player" {
   name              = "/aws/lambda/chess-cloud-player"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "players" {
+  name              = "/aws/lambda/chess-cloud-players"
   retention_in_days = 14
 }
 
@@ -310,6 +339,41 @@ resource "aws_iam_role_policy" "player" {
   })
 }
 
+resource "aws_iam_role" "players" {
+  name               = "chess-cloud-players"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "players" {
+  name = "players"
+  role = aws_iam_role.players.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        # Scan, and the only route in the project that gets it. "List all
+        # players" has no partition key, so the primary key cannot answer it -
+        # this reads the whole table and discards most of what it reads.
+        #
+        # Granted knowingly and temporarily. The cost of a Scan grows with
+        # total items rather than with the number of players, so one busy
+        # account adds ~200 archive items that this route must read on every
+        # call. The fix is a GSI keyed for listing, at which point this becomes
+        # Query and the permission goes back to matching every other read role.
+        Action   = ["dynamodb:Scan"]
+        Resource = local.table_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.players.arn}:*"
+      },
+    ]
+  })
+}
+
 resource "aws_iam_role" "status" {
   name               = "chess-cloud-status"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
@@ -413,6 +477,29 @@ resource "aws_lambda_function" "player" {
   depends_on = [aws_cloudwatch_log_group.player]
 }
 
+resource "aws_lambda_function" "players" {
+  function_name = "chess-cloud-players"
+  role          = aws_iam_role.players.arn
+
+  filename         = data.archive_file.players.output_path
+  source_code_hash = data.archive_file.players.output_base64sha256
+
+  runtime = "python3.13"
+  handler = "players.handler"
+  # Longer than the other reads: a Scan pages through the entire table, and
+  # while that is fast at the current size it is the one read whose duration
+  # grows with everything ever ingested rather than with what it returns.
+  timeout = 20
+
+  environment {
+    variables = {
+      TABLE_NAME = local.table_name
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.players]
+}
+
 resource "aws_lambda_function" "status" {
   function_name = "chess-cloud-status"
   role          = aws_iam_role.status.arn
@@ -438,6 +525,34 @@ resource "aws_lambda_function" "status" {
 resource "aws_apigatewayv2_api" "api" {
   name          = "chess-cloud"
   protocol_type = "HTTP"
+
+  # CORS exists only because the client became a browser. curl and the drill
+  # scripts never needed it: the same-origin policy is enforced by browsers, so
+  # it constrains page JavaScript rather than the API. Without this, a fetch
+  # from the React app is blocked by the browser *after* the API has already
+  # answered - the request succeeds and the response is thrown away, which is
+  # why the symptom is a console error rather than a 4xx.
+  #
+  # API Gateway answers the preflight OPTIONS itself, so no Lambda runs for it.
+  cors_configuration {
+    # Explicit origins, not "*". A wildcard would let any site on the internet
+    # call this API with a user's browser - harmless for the public reads, not
+    # harmless for POST /games. The list carries every origin the app is served
+    # from, which is what lets a custom domain be added later without
+    # swapping the CloudFront one out mid-migration.
+    allow_origins = var.allowed_origins
+
+    allow_methods = ["GET", "POST", "OPTIONS"]
+
+    # Authorization is the one that matters: without it the browser strips the
+    # bearer token from cross-origin requests and every authenticated call
+    # arrives at the gateway looking unauthenticated.
+    allow_headers = ["Authorization", "Content-Type"]
+
+    # How long a browser may cache the preflight result. An hour means one
+    # OPTIONS per browser per session rather than one before every POST.
+    max_age = 3600
+  }
 }
 
 resource "aws_apigatewayv2_integration" "submit" {
@@ -458,6 +573,13 @@ resource "aws_apigatewayv2_integration" "player" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
   integration_uri        = aws_lambda_function.player.invoke_arn
+  payload_format_version = "2.0"
+}
+
+resource "aws_apigatewayv2_integration" "players" {
+  api_id                 = aws_apigatewayv2_api.api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.players.invoke_arn
   payload_format_version = "2.0"
 }
 
@@ -527,6 +649,18 @@ resource "aws_apigatewayv2_route" "player" {
   api_id    = aws_apigatewayv2_api.api.id
   route_key = "GET /player/{platform}/{username}"
   target    = "integrations/${aws_apigatewayv2_integration.player.id}"
+}
+
+# The directory: every player anyone has ever submitted. Unauthenticated like
+# the other reads, and that is a slightly larger statement than it was for the
+# per-player routes - those require you to already know a username, this one
+# hands out the list. It is consistent with analysis being public shared data
+# (Phase 2's decision), but it is the route that makes "public" visible rather
+# than merely true, so it is worth stating rather than inheriting.
+resource "aws_apigatewayv2_route" "players" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "GET /players"
+  target    = "integrations/${aws_apigatewayv2_integration.players.id}"
 }
 
 resource "aws_apigatewayv2_integration" "link" {
@@ -625,6 +759,14 @@ resource "aws_lambda_permission" "player" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.player.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+resource "aws_lambda_permission" "players" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.players.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
 }
