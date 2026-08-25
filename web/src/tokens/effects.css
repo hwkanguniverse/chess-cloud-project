@@ -1,0 +1,13 @@
+:root {
+  --shadow-xs:0 1px 2px rgba(20,20,18,.05);
+  --shadow-sm:0 1px 3px rgba(20,20,18,.06), 0 1px 2px rgba(20,20,18,.04);
+  --shadow-md:0 6px 20px -6px rgba(20,20,18,.10), 0 2px 6px -2px rgba(20,20,18,.06);
+  --shadow-lg:0 18px 48px -12px rgba(20,20,18,.16), 0 6px 16px -6px rgba(20,20,18,.08);
+  --ring-focus:0 0 0 3px var(--accent-soft), 0 0 0 1px var(--accent);
+
+  --ease-out:cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-in-out:cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-fast:120ms;
+  --dur-normal:200ms;
+  --dur-slow:320ms;
+}

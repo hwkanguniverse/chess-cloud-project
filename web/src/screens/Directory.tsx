@@ -2,13 +2,14 @@
  * Directory: every player anyone has submitted.
  *
  * Public, like the API route behind it. This is the screen that makes the
- * app's "analysis is public shared data" decision visible - the other read
- * screens require you to already know a username, this one hands out the list.
+ * app's "analysis is public shared data" decision visible - the player screen
+ * requires you to already know a username, this one hands out the list.
  */
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { listPlayers, type DirectoryEntry } from "../api";
+import { Badge, ProgressBar } from "../components/ui";
 
 function ago(seconds: number | null): string {
   if (!seconds) return "—";
@@ -36,8 +37,7 @@ export default function Directory() {
       .catch((err) => !cancelled && setError(String(err.message ?? err)));
 
     // StrictMode mounts effects twice in development. Without this the second
-    // response can land after the first and overwrite fresher state - harmless
-    // here, but the same pattern matters on the polling screen.
+    // response can land after the first and overwrite fresher state.
     return () => {
       cancelled = true;
     };
@@ -46,12 +46,19 @@ export default function Directory() {
   if (error) return <p className="error">{error}</p>;
   if (!players) return <p className="empty">Loading…</p>;
   if (players.length === 0) {
-    return <p className="empty">Nobody has been analysed yet.</p>;
+    return (
+      <p className="empty">
+        Nobody has been analysed yet. <Link to="/">Be the first.</Link>
+      </p>
+    );
   }
 
   return (
     <section>
       <h1>Players</h1>
+      <p className="muted">
+        {players.length} analysed. Anyone can look at any of them.
+      </p>
 
       {truncated && (
         <p className="notice warn">
@@ -60,7 +67,7 @@ export default function Directory() {
         </p>
       )}
 
-      <table className="table">
+      <table className="table" style={{ marginTop: "var(--sp-8)" }}>
         <thead>
           <tr>
             <th>Player</th>
@@ -70,30 +77,42 @@ export default function Directory() {
           </tr>
         </thead>
         <tbody>
-          {players.map((player) => (
-            <tr key={`${player.platform}/${player.username}`}>
-              <td>
-                <Link to={`/player/${player.platform}/${player.username}`}>
-                  {player.username}
-                </Link>
-              </td>
-              <td className="num">{player.games.toLocaleString()}</td>
-              {/* Progress as a share of the work, not a month count - the
-                  archive is the worker's unit and stays out of the product. */}
-              <td>
-                {player.pending > 0 && (
-                  <span className="pending small">
-                    ingesting —{" "}
-                    {Math.round(
-                      (player.complete / Math.max(player.months, 1)) * 100,
-                    )}
-                    %
-                  </span>
-                )}
-              </td>
-              <td className="num muted">{ago(player.lastAnalysedAt)}</td>
-            </tr>
-          ))}
+          {players.map((player) => {
+            // Progress as a share of the work, not a count of archives - the
+            // archive is the worker's unit and stays out of the product.
+            const percent = Math.round(
+              (player.complete / Math.max(player.months, 1)) * 100,
+            );
+            return (
+              <tr key={`${player.platform}/${player.username}`}>
+                <td>
+                  <Link to={`/player/${player.platform}/${player.username}`}>
+                    {player.username}
+                  </Link>
+                </td>
+                <td className="num">{player.games.toLocaleString()}</td>
+                <td style={{ width: "12rem" }}>
+                  {player.pending > 0 && (
+                    <span
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: "var(--sp-3)",
+                      }}
+                    >
+                      <ProgressBar
+                        value={percent}
+                        height={6}
+                        style={{ maxWidth: "7rem" }}
+                      />
+                      <Badge tone="accent">{percent}%</Badge>
+                    </span>
+                  )}
+                </td>
+                <td className="num muted">{ago(player.lastAnalysedAt)}</td>
+              </tr>
+            );
+          })}
         </tbody>
       </table>
     </section>

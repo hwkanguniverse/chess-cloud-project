@@ -1,0 +1,47 @@
+:root {
+  /* Neutrals — warm-cool near-white to ink */
+  --n-0:#ffffff;
+  --n-25:#fcfcfb;
+  --n-50:#f7f7f5;
+  --n-100:#efefec;
+  --n-150:#e7e7e3;
+  --n-200:#dcdcd7;
+  --n-300:#c6c6c0;
+  --n-400:#a3a39c;
+  --n-500:#7b7b73;
+  --n-600:#5c5c55;
+  --n-700:#42423d;
+  --n-800:#2b2b27;
+  --n-900:#1a1a17;
+  --ink:#141412;
+
+  /* Brand accent — restrained slate-blue */
+  --accent:oklch(0.55 0.13 255);
+  --accent-hover:oklch(0.49 0.13 255);
+  --accent-soft:oklch(0.96 0.03 255);
+  --accent-ink:oklch(0.38 0.11 255);
+
+  /* Chess result semantics */
+  --win:oklch(0.62 0.12 150);
+  --win-soft:oklch(0.955 0.03 150);
+  --win-ink:oklch(0.43 0.09 150);
+  --loss:oklch(0.60 0.16 27);
+  --loss-soft:oklch(0.955 0.03 27);
+  --loss-ink:oklch(0.45 0.13 27);
+  --draw:oklch(0.66 0.02 250);
+  --draw-soft:oklch(0.955 0.006 250);
+  --draw-ink:oklch(0.45 0.02 250);
+
+  /* Semantic aliases */
+  --bg:var(--n-25);
+  --surface:var(--n-0);
+  --surface-2:var(--n-50);
+  --surface-sunken:var(--n-100);
+  --border:var(--n-200);
+  --border-strong:var(--n-300);
+  --text:var(--ink);
+  --text-muted:var(--n-600);
+  --text-subtle:var(--n-500);
+  --text-faint:var(--n-400);
+  --text-on-dark:var(--n-0);
+}

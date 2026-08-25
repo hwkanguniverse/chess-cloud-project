@@ -1,21 +1,19 @@
-/* Plain CSS, no framework. The app is four screens and two table layouts;
-   a utility framework would be more bytes than the app itself. */
+/* App styles. The palette, type scale, spacing, radii, shadows and motion all
+   come from the design system in ./tokens - nothing here redefines a colour or
+   a size that a token already names. What lives here is layout and the two
+   table treatments, which the system does not cover: it ships primitives, and
+   the games table is this app's main data surface. */
+
+@import './tokens.css';
 
 :root {
-  --bg: #12100e;
-  --surface: #1c1917;
-  --border: #302b27;
-  --text: #ece7e2;
-  --muted: #9a908a;
-  --accent: #7fa650;
-  --win: #7fa650;
-  --draw: #a8894a;
-  --loss: #b4635a;
-
-  color-scheme: dark;
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light;
   background: var(--bg);
   color: var(--text);
+  font-family: var(--font-body);
+  font-size: var(--fs-body);
+  line-height: var(--lh-normal);
+  -webkit-font-smoothing: antialiased;
 }
 
 * {
@@ -28,9 +26,9 @@ body {
 }
 
 .app {
-  max-width: 62rem;
+  max-width: var(--maxw-content);
   margin: 0 auto;
-  padding: 0 1.25rem 4rem;
+  padding: 0 var(--sp-6) var(--sp-24);
 }
 
 /* --- Header --------------------------------------------------------------- */
@@ -38,28 +36,34 @@ body {
 .app-header {
   display: flex;
   align-items: center;
-  gap: 1.5rem;
-  padding: 1.25rem 0;
+  gap: var(--sp-8);
+  padding: var(--sp-5) 0;
   border-bottom: 1px solid var(--border);
-  margin-bottom: 2rem;
+  margin-bottom: var(--sp-10);
 }
 
 .brand {
-  font-weight: 600;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: var(--fs-h4);
+  letter-spacing: var(--tracking-tight);
   color: var(--text);
   text-decoration: none;
 }
 
 .app-header nav {
   display: flex;
-  gap: 1rem;
+  gap: var(--sp-5);
   margin-right: auto;
 }
 
 .app-header nav a {
-  color: var(--muted);
+  font-family: var(--font-display);
+  font-weight: 500;
+  font-size: var(--fs-sm);
+  color: var(--text-muted);
   text-decoration: none;
-  font-size: 0.9rem;
+  transition: color var(--dur-fast) var(--ease-out);
 }
 
 .app-header nav a:hover {
@@ -69,18 +73,19 @@ body {
 .user-menu {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 0.85rem;
+  gap: var(--sp-3);
+  font-size: var(--fs-sm);
 }
 
 .link-button {
   background: none;
   border: none;
-  color: var(--muted);
+  color: var(--text-muted);
   cursor: pointer;
   padding: 0;
   font: inherit;
   text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .link-button:hover {
@@ -90,52 +95,65 @@ body {
 /* --- Type ----------------------------------------------------------------- */
 
 h1 {
-  font-size: 1.6rem;
-  margin: 0 0 0.35rem;
+  font-family: var(--font-display);
+  font-size: var(--fs-h2);
+  font-weight: 700;
+  letter-spacing: var(--tracking-tight);
+  line-height: var(--lh-snug);
+  margin: 0 0 var(--sp-2);
 }
 
 a {
   color: var(--accent);
+  text-decoration-color: color-mix(in oklch, var(--accent) 35%, transparent);
+  text-underline-offset: 2px;
+}
+
+a:hover {
+  color: var(--accent-hover);
 }
 
 .muted {
-  color: var(--muted);
+  color: var(--text-muted);
 }
 
 .small {
-  font-size: 0.85rem;
+  font-size: var(--fs-sm);
+}
+
+/* Eyebrow labels: mono, uppercase, wide tracking - the system's one piece of
+   type styling that is a rule rather than a token. */
+.label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
+  text-transform: uppercase;
+  color: var(--text-subtle);
 }
 
 .empty,
 .error {
-  padding: 2rem 0;
-  color: var(--muted);
+  padding: var(--sp-10) 0;
+  color: var(--text-muted);
 }
 
 .error {
-  color: var(--loss);
-}
-
-.crumb {
-  margin: 0 0 0.75rem;
-  font-size: 0.9rem;
-}
-
-.crumb a {
-  text-decoration: none;
+  color: var(--loss-ink);
 }
 
 .notice {
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 0.7rem 0.9rem;
-  font-size: 0.9rem;
-  margin: 1rem 0;
+  border-radius: var(--radius-md);
+  padding: var(--sp-3) var(--sp-4);
+  font-size: var(--fs-sm);
+  margin: var(--sp-4) 0;
 }
 
 .notice.warn {
-  border-color: var(--draw);
+  background: var(--loss-soft);
+  border-color: transparent;
+  color: var(--loss-ink);
 }
 
 .sr-only {
@@ -143,119 +161,93 @@ a {
   width: 1px;
   height: 1px;
   overflow: hidden;
-  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
 }
 
 /* --- Submit --------------------------------------------------------------- */
 
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 1.75rem;
+.submit-card {
+  max-width: 34rem;
+  margin: var(--sp-16) auto;
 }
 
 .submit-form {
   display: flex;
-  gap: 0.6rem;
-  margin: 1.25rem 0 0.5rem;
+  gap: var(--sp-2);
+  margin: var(--sp-5) 0 var(--sp-2);
 }
 
-.submit-form input {
+.submit-form > :first-child {
   flex: 1;
-  padding: 0.65rem 0.85rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--bg);
-  color: var(--text);
-  font: inherit;
-}
-
-.submit-form input:focus {
-  outline: 2px solid var(--accent);
-  outline-offset: -1px;
-}
-
-.submit-form button {
-  padding: 0.65rem 1.4rem;
-  border-radius: 6px;
-  border: none;
-  background: var(--accent);
-  color: #12100e;
-  font: inherit;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.submit-form button:disabled {
-  opacity: 0.45;
-  cursor: default;
 }
 
 /* --- Stats ---------------------------------------------------------------- */
 
 .stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
-  gap: 1px;
-  background: var(--border);
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  overflow: hidden;
-  margin: 1.5rem 0;
-}
-
-.stat {
-  background: var(--surface);
-  padding: 1rem;
-}
-
-.stat-value {
-  font-size: 1.35rem;
-  font-variant-numeric: tabular-nums;
-}
-
-.stat-label {
-  font-size: 0.75rem;
-  color: var(--muted);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  margin-top: 0.2rem;
+  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+  gap: var(--sp-8);
+  padding: var(--sp-6) 0 var(--sp-8);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-6);
 }
 
 /* --- Tables --------------------------------------------------------------- */
+/* Two long lists carry this app - the directory and the games list - so the
+   table is the main data surface rather than a supporting element. Numbers are
+   mono per the system's "numbers are the hero" rule; that also makes columns
+   of ratings and dates align without tabular-nums tricks. */
 
 .table {
   width: 100%;
   border-collapse: collapse;
-  margin-top: 1.5rem;
-  font-size: 0.9rem;
+  font-size: var(--fs-sm);
 }
 
 .table th {
   text-align: left;
+  font-family: var(--font-mono);
   font-weight: 500;
-  font-size: 0.75rem;
+  font-size: var(--fs-xs);
+  letter-spacing: var(--tracking-label);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--muted);
-  padding: 0.5rem 0.75rem;
+  color: var(--text-subtle);
+  padding: var(--sp-2) var(--sp-3);
   border-bottom: 1px solid var(--border);
+  /* The games list runs to thousands of rows; a floating header is what keeps
+     the columns meaningful once the first screen has scrolled away. */
+  position: sticky;
+  top: 0;
+  background: var(--bg);
+  z-index: 1;
 }
 
 .table td {
-  padding: 0.55rem 0.75rem;
-  border-bottom: 1px solid var(--border);
+  padding: var(--sp-3);
+  border-bottom: 1px solid var(--n-100);
+}
+
+.table tbody tr:hover {
+  background: var(--surface-2);
 }
 
 .table .num {
   text-align: right;
+  font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
 }
 
-.table tbody tr:hover {
-  background: var(--surface);
+.table .mono {
+  font-family: var(--font-mono);
+}
+
+.table a {
+  text-decoration: none;
+}
+
+.table a:hover {
+  text-decoration: underline;
 }
 
 /* --- Load more ------------------------------------------------------------ */
@@ -264,99 +256,67 @@ a {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 0.5rem;
-  padding: 2rem 0;
+  gap: var(--sp-3);
+  padding: var(--sp-10) 0;
 }
 
-.load-more button {
-  padding: 0.55rem 1.5rem;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--text);
-  font: inherit;
-  cursor: pointer;
+/* --- Ingest progress ------------------------------------------------------ */
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin: var(--sp-4) 0;
 }
 
-.load-more button:hover {
-  border-color: var(--muted);
+.progress-row .bar {
+  flex: 1;
+  max-width: 18rem;
 }
 
-/* --- Badges --------------------------------------------------------------- */
-
-.pill {
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  padding: 0.15rem 0.45rem;
-  border-radius: 4px;
-  border: 1px solid var(--border);
-  color: var(--muted);
-}
-
-.pill-complete {
-  border-color: transparent;
-  color: var(--muted);
-}
-
-.pill-pending {
-  border-color: var(--draw);
-  color: var(--draw);
-}
-
-.pill-failed {
-  border-color: var(--loss);
-  color: var(--loss);
-}
-
-.pending {
-  color: var(--draw);
-}
-
-/* A filled or hollow disc for the colour played - cheaper to scan than the
-   words "white" and "black" repeated down a column of 800 rows. */
+/* A filled or hollow disc for the colour played - faster to scan down a column
+   of a thousand rows than the words "white" and "black". */
 .disc {
   display: inline-block;
-  width: 0.65rem;
-  height: 0.65rem;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
-  border: 1px solid var(--muted);
+  border: 1px solid var(--n-400);
 }
 
 .disc-w {
-  background: var(--text);
-  border-color: var(--text);
+  background: var(--n-0);
 }
 
 .disc-b {
-  background: transparent;
+  background: var(--ink);
+  border-color: var(--ink);
 }
 
-.outcome {
-  font-size: 0.8rem;
-}
+/* --- Amplify -------------------------------------------------------------- */
+/* The auth screens come from a component library this app does not control, so
+   they are re-themed through its own custom properties rather than restyled.
+   Mapping them onto the design system's tokens is what stops sign-in looking
+   like a different product. */
 
-.outcome-win {
-  color: var(--win);
-}
-
-.outcome-draw {
-  color: var(--draw);
-}
-
-.outcome-loss {
-  color: var(--loss);
-}
-
-/* Amplify's authenticator, themed to match rather than left default AWS blue. */
 [data-amplify-authenticator] {
+  --amplify-fonts-default-variable: var(--font-body);
+  --amplify-fonts-default-static: var(--font-body);
   --amplify-colors-background-primary: var(--surface);
-  --amplify-colors-background-secondary: var(--bg);
+  --amplify-colors-background-secondary: var(--surface-2);
   --amplify-colors-font-primary: var(--text);
-  --amplify-colors-font-secondary: var(--muted);
+  --amplify-colors-font-secondary: var(--text-muted);
   --amplify-colors-border-primary: var(--border);
+  --amplify-colors-border-focus: var(--accent);
+  --amplify-colors-brand-primary-10: var(--accent-soft);
   --amplify-colors-brand-primary-80: var(--accent);
-  --amplify-colors-brand-primary-90: var(--accent);
-  --amplify-colors-brand-primary-100: var(--accent);
-  --amplify-components-button-primary-color: #12100e;
+  --amplify-colors-brand-primary-90: var(--accent-hover);
+  --amplify-colors-brand-primary-100: var(--accent-hover);
+  --amplify-components-button-primary-background-color: var(--ink);
+  --amplify-components-button-primary-hover-background-color: var(--n-800);
+  --amplify-components-authenticator-router-border-color: var(--border);
+  --amplify-components-authenticator-router-box-shadow: var(--shadow-sm);
+  --amplify-radii-small: var(--radius-sm);
+  --amplify-radii-medium: var(--radius-md);
+  --amplify-radii-large: var(--radius-lg);
 }

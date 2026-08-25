@@ -1,0 +1,8 @@
+/* Design-system tokens, copied from the chess-cloud design system.
+   Treat these files as vendored: re-export from the design system rather than
+   editing them here, or the next update silently reverts local changes. */
+@import './tokens/fonts.css';
+@import './tokens/colors.css';
+@import './tokens/typography.css';
+@import './tokens/spacing.css';
+@import './tokens/effects.css';

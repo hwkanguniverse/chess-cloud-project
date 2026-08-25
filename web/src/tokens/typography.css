@@ -1,0 +1,25 @@
+:root {
+  --font-display:'Space Grotesk', system-ui, sans-serif;
+  --font-body:'Hanken Grotesk', system-ui, sans-serif;
+  --font-mono:'JetBrains Mono', ui-monospace, monospace;
+
+  /* Type scale */
+  --fs-display:clamp(40px, 6vw, 72px);
+  --fs-h1:40px;
+  --fs-h2:30px;
+  --fs-h3:22px;
+  --fs-h4:18px;
+  --fs-body:15px;
+  --fs-sm:13px;
+  --fs-xs:11px;
+  --fs-stat:44px;
+
+  --lh-tight:1.05;
+  --lh-snug:1.2;
+  --lh-normal:1.5;
+
+  --tracking-tight:-0.02em;
+  --tracking-normal:0;
+  --tracking-wide:0.02em;
+  --tracking-label:0.08em;
+}
