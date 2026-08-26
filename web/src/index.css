@@ -184,13 +184,59 @@ a:hover {
 
 /* --- Stats ---------------------------------------------------------------- */
 
+/* Sized from the real data, not from a placeholder. A prolific player has
+   six-figure totals: at the system's --fs-stat (44px) mono, "129,391" is
+   11.6rem wide and the rating range "1174-3535" is 14.8rem - against the 9rem
+   columns this started with, which is why they overlapped rather than wrapped.
+   Mono makes this arithmetic rather than guesswork (~0.6em per character).
+ *
+ * Stat sets font-size inline from var(--fs-stat), so no stylesheet rule can
+ * reach it - an inline style wins. Redefining the token on this wrapper is
+ * the way in, and it is the mechanism the system intends: the component reads
+ * tokens, so the scope that sets them decides.
+ *
+ * 34px puts the five figures at 7.6-8.9rem, inside an 11rem column with room
+ * for the labels. The house rule is that numbers stay unabbreviated ("1,842
+ * games, not 1.8k"), so when the number will not yield, the type has to. */
 .stats {
+  --fs-stat: clamp(24px, 2.6vw, 34px);
+
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  gap: var(--sp-8);
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: var(--sp-6) var(--sp-8);
   padding: var(--sp-6) 0 var(--sp-8);
   border-bottom: 1px solid var(--border);
   margin-bottom: var(--sp-6);
+
+  /* Top-aligned: the sub-lines are different heights (one carries a win rate,
+     another a two-line colour split), and stretching would drag the figures
+     out of line with each other. The labels and figures are what the eye
+     tracks across the row. */
+  align-items: start;
+}
+
+/* The rating range is a pair, not a figure, so it is reliably ~30% wider than
+   any other stat and would otherwise set the column width for all five. Given
+   its own two columns it stays on one line while the rest stay compact. */
+.stats > :last-child {
+  grid-column: span 2;
+}
+
+@media (max-width: 60rem) {
+  .stats > :last-child {
+    grid-column: auto;
+  }
+}
+
+/* The time-control split. Given an eyebrow label because otherwise it reads as
+   an orphaned string of numbers under the stat row rather than as its own
+   fact. */
+.breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-4);
+  margin-bottom: var(--sp-8);
 }
 
 /* --- Tables --------------------------------------------------------------- */
@@ -203,6 +249,7 @@ a:hover {
   width: 100%;
   border-collapse: collapse;
   font-size: var(--fs-sm);
+  margin-top: var(--sp-6);
 }
 
 .table th {

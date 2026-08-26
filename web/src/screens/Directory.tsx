@@ -67,7 +67,7 @@ export default function Directory() {
         </p>
       )}
 
-      <table className="table" style={{ marginTop: "var(--sp-8)" }}>
+      <table className="table">
         <thead>
           <tr>
             <th>Player</th>

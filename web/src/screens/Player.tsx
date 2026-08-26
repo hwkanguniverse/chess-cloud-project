@@ -228,17 +228,29 @@ export default function Player() {
               ? `${totals.ratingMin}–${totals.ratingMax}`
               : "—"
           }
-          sub={`${totals.asWhite.toLocaleString()} as white · ${totals.asBlack.toLocaleString()} as black`}
+          // Two lines rather than one wrapping string: at six figures the
+          // single line broke mid-phrase ("64,817 as white ·" / "64,574 as
+          // black"), which read as damage rather than as two facts.
+          sub={
+            <>
+              {totals.asWhite.toLocaleString()} as white
+              <br />
+              {totals.asBlack.toLocaleString()} as black
+            </>
+          }
         />
       </div>
 
       {Object.keys(totals.byClass ?? {}).length > 0 && (
-        <p className="muted small">
-          {Object.entries(totals.byClass)
-            .sort((a, b) => b[1] - a[1])
-            .map(([name, count]) => `${name} ${count.toLocaleString()}`)
-            .join(" · ")}
-        </p>
+        <div className="breakdown">
+          <span className="label">By time control</span>
+          <span className="muted small">
+            {Object.entries(totals.byClass)
+              .sort((a, b) => b[1] - a[1])
+              .map(([name, count]) => `${name} ${count.toLocaleString()}`)
+              .join(" · ")}
+          </span>
+        </div>
       )}
 
       {failed > 0 && (
