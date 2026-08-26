@@ -52,6 +52,16 @@ BLUNDER = 300
 MISTAKE = 100
 INACCURACY = 50
 
+# What a mate is worth when forced onto the centipawn scale. Only ever used to
+# store the raw eval; loss arithmetic clamps to CLAMP_CP below.
+MATE_SCORE = 10000
+
+# Evaluations are clamped to +/- this before computing centipawn loss. Roughly
+# "a queen up and winning" - beyond it the position is decided and further
+# engine advantage is not a meaningful difference in play quality. Lichess and
+# most analysis tools clamp somewhere in this range for the same reason.
+CLAMP_CP = 1000
+
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 sqs = boto3.client("sqs")
 
@@ -104,11 +114,27 @@ def evaluate_game(engine, pgn_text, colour):
         info = engine.analyse(board, chess.engine.Limit(depth=DEPTH))
         # From the point of view of the side to move, so a loss is always a
         # loss for whoever just moved regardless of colour.
-        evals.append(info["score"].pov(board.turn).score(mate_score=10000))
+        evals.append(info["score"].pov(board.turn).score(mate_score=MATE_SCORE))
 
     losses = []
     for i in range(len(evals) - 1):
-        losses.append(max(0, evals[i] - (-evals[i + 1])))
+        # Clamp before subtracting. A mate score is not a centipawn value on
+        # the same scale - going from equal to "mate in 3" is not a 10,000
+        # centipawn mistake - and subtracting one produces losses in the
+        # thousands that then dominate the average.
+        #
+        # Found by measuring: 4 of the first 11 games came back with a worst
+        # loss around 9,000-10,000, and the mean ACPL over those games was
+        # 262 against 46 for the rest. A 5.7x distortion of the dashboard's
+        # headline number, which is worse than the depth-8 error this project
+        # already rejected on accuracy grounds.
+        #
+        # Clamping to CLAMP_CP means a position already lost stops accruing
+        # further "loss" - which is right, because a player who is down a
+        # queen cannot meaningfully blunder more of the same game away.
+        before = max(-CLAMP_CP, min(CLAMP_CP, evals[i]))
+        after = max(-CLAMP_CP, min(CLAMP_CP, -evals[i + 1]))
+        losses.append(max(0, before - after))
 
     # Only the player's own moves count towards their statistics. White moves
     # on even plies, black on odd.

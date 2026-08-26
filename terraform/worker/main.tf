@@ -227,9 +227,20 @@ resource "aws_iam_role_policy" "execution" {
         Resource = aws_ecr_repository.worker.arn
       },
       {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "${aws_cloudwatch_log_group.worker.arn}:*"
+        Effect = "Allow"
+        # Both log groups. This role is shared by the ingestion worker and the
+        # evaluator, and it is the *execution* role - the one the ECS agent
+        # uses to pull the image and open the log stream, before any container
+        # code runs. Scoping it to one group meant the evaluator could not
+        # start at all: the task was placed, failed to create its stream, and
+        # was killed before the entrypoint executed. A task role misconfigured
+        # this way fails inside the container and logs why; an execution role
+        # fails outside it and only the service events say so.
+        Action = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = [
+          "${aws_cloudwatch_log_group.worker.arn}:*",
+          "${aws_cloudwatch_log_group.evaluator.arn}:*",
+        ]
       },
     ]
   })
