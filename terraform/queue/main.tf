@@ -117,6 +117,70 @@ resource "aws_sqs_queue_redrive_allow_policy" "analysis_dlq" {
   })
 }
 
+# --- Evaluation queue -------------------------------------------------------
+
+# A second queue, because the two workers have opposite constraints. Ingestion
+# is pinned to one task to protect Chess.com's API - the failure mode there is
+# an IP ban, which money cannot undo. Evaluation reads PGNs already in the
+# table and runs a local binary, so it makes no upstream requests and scales
+# freely. Sharing one queue would force the stricter limit on both.
+
+resource "aws_sqs_queue" "evaluation_dlq" {
+  name                      = "${var.queue_name}-eval-dlq"
+  message_retention_seconds = 1209600
+}
+
+resource "aws_sqs_queue" "evaluation" {
+  name = "${var.queue_name}-eval"
+
+  # One message is one player: up to 400 games (100 per time control) at ~56s
+  # each at depth 18, so 6.2 hours worst case against the 12h SQS maximum.
+  #
+  # The consequence worth knowing: a player is analysed by ONE worker, so
+  # adding workers speeds up *concurrent players*, not a single large one.
+  # Splitting a player across workers would mean one message per game and a
+  # way to know when the set is done - real work, not yet justified while the
+  # cap keeps the worst case to hours rather than days.
+  visibility_timeout_seconds = 25200 # 7h, worst case plus headroom
+
+  receive_wait_time_seconds = 20
+  message_retention_seconds = 345600
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.evaluation_dlq.arn
+    # Two, not three. Each retry here is up to six hours of Fargate time
+    # rather than a few seconds of HTTP, so a poison message is far more
+    # expensive to keep retrying than it is to quarantine.
+    maxReceiveCount = 2
+  })
+}
+
+resource "aws_sqs_queue_redrive_allow_policy" "evaluation_dlq" {
+  queue_url = aws_sqs_queue.evaluation_dlq.id
+
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "byQueue"
+    sourceQueueArns   = [aws_sqs_queue.evaluation.arn]
+  })
+}
+
+output "eval_queue_url" {
+  value = aws_sqs_queue.evaluation.url
+}
+
+output "eval_queue_arn" {
+  description = "For scoping the analyse Lambda's send and the evaluator's receive/delete."
+  value       = aws_sqs_queue.evaluation.arn
+}
+
+output "eval_dlq_url" {
+  value = aws_sqs_queue.evaluation_dlq.url
+}
+
+output "eval_dlq_arn" {
+  value = aws_sqs_queue.evaluation_dlq.arn
+}
+
 output "queue_url" {
   value = aws_sqs_queue.analysis.url
 }

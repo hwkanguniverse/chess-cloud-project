@@ -150,6 +150,9 @@ locals {
   queue_url  = data.terraform_remote_state.queue.outputs.queue_url
   queue_arn  = data.terraform_remote_state.queue.outputs.queue_arn
 
+  eval_queue_url = data.terraform_remote_state.queue.outputs.eval_queue_url
+  eval_queue_arn = data.terraform_remote_state.queue.outputs.eval_queue_arn
+
   handlers_dir = "${path.module}/../../app/handlers"
 }
 
@@ -161,6 +164,12 @@ data "archive_file" "submit" {
   type        = "zip"
   source_file = "${local.handlers_dir}/submit.py"
   output_path = "${path.module}/build/submit.zip"
+}
+
+data "archive_file" "analyse" {
+  type        = "zip"
+  source_file = "${local.handlers_dir}/analyse.py"
+  output_path = "${path.module}/build/analyse.zip"
 }
 
 data "archive_file" "status" {
@@ -191,6 +200,11 @@ data "archive_file" "players" {
 # Created explicitly rather than letting Lambda auto-create them: auto-created
 # groups keep logs forever (a slow cost leak), and a pre-existing group is
 # what lets the IAM policy name an exact resource instead of a wildcard.
+
+resource "aws_cloudwatch_log_group" "analyse" {
+  name              = "/aws/lambda/chess-cloud-analyse"
+  retention_in_days = 14
+}
 
 resource "aws_cloudwatch_log_group" "submit" {
   name              = "/aws/lambda/chess-cloud-submit"
@@ -232,6 +246,44 @@ data "aws_iam_policy_document" "lambda_assume" {
       identifiers = ["lambda.amazonaws.com"]
     }
   }
+}
+
+resource "aws_iam_role" "analyse" {
+  name               = "chess-cloud-analyse"
+  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
+}
+
+resource "aws_iam_role_policy" "analyse" {
+  name = "analyse"
+  role = aws_iam_role.analyse.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        # Query only, and only to confirm the player has stored games before
+        # queueing work against them. This route writes nothing: the evaluator
+        # owns the eval fields, and the route that asks for evaluation has no
+        # business modifying the table.
+        Action   = ["dynamodb:Query"]
+        Resource = local.table_arn
+      },
+      {
+        Effect = "Allow"
+        # SendMessage only - one player, one message. No SendMessageBatch here
+        # because there is nothing to batch, unlike submit which fans a player
+        # out into a message per month.
+        Action   = ["sqs:SendMessage"]
+        Resource = local.eval_queue_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.analyse.arn}:*"
+      },
+    ]
+  })
 }
 
 resource "aws_iam_role" "submit" {
@@ -415,6 +467,29 @@ resource "aws_iam_role_policy" "status" {
 
 # --- Functions -------------------------------------------------------------
 
+resource "aws_lambda_function" "analyse" {
+  function_name = "chess-cloud-analyse"
+  role          = aws_iam_role.analyse.arn
+
+  filename         = data.archive_file.analyse.output_path
+  source_code_hash = data.archive_file.analyse.output_base64sha256
+
+  runtime = "python3.13"
+  handler = "analyse.handler"
+  # One Query and one SendMessage. Nothing outbound, unlike submit, which is
+  # why this keeps the read handlers' timeout rather than submit's 20s.
+  timeout = 10
+
+  environment {
+    variables = {
+      TABLE_NAME     = local.table_name
+      EVAL_QUEUE_URL = local.eval_queue_url
+    }
+  }
+
+  depends_on = [aws_cloudwatch_log_group.analyse]
+}
+
 resource "aws_lambda_function" "submit" {
   function_name = "chess-cloud-submit"
   role          = aws_iam_role.submit.arn
@@ -576,6 +651,13 @@ resource "aws_apigatewayv2_integration" "submit" {
   payload_format_version = "2.0"
 }
 
+resource "aws_apigatewayv2_integration" "analyse" {
+  api_id                 = aws_apigatewayv2_api.api.id
+  integration_type       = "AWS_PROXY"
+  integration_uri        = aws_lambda_function.analyse.invoke_arn
+  payload_format_version = "2.0"
+}
+
 resource "aws_apigatewayv2_integration" "status" {
   api_id                 = aws_apigatewayv2_api.api.id
   integration_type       = "AWS_PROXY"
@@ -619,6 +701,17 @@ resource "aws_apigatewayv2_authorizer" "jwt" {
     audience = [data.terraform_remote_state.auth.outputs.user_pool_client_id]
     issuer   = data.terraform_remote_state.auth.outputs.issuer
   }
+}
+
+# Authenticated, like submit and for the same reason: it spends money. The
+# read routes stay public because analysis is public shared data.
+resource "aws_apigatewayv2_route" "analyse" {
+  api_id    = aws_apigatewayv2_api.api.id
+  route_key = "POST /analyse"
+  target    = "integrations/${aws_apigatewayv2_integration.analyse.id}"
+
+  authorization_type = "JWT"
+  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
 }
 
 resource "aws_apigatewayv2_route" "submit" {
@@ -753,6 +846,14 @@ resource "aws_apigatewayv2_stage" "default" {
 
 # Lets API Gateway invoke the functions - scoped to this API's execution ARN,
 # so no other API (or account) can trigger them.
+resource "aws_lambda_permission" "analyse" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.analyse.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
 resource "aws_lambda_permission" "submit" {
   statement_id  = "AllowAPIGatewayInvoke"
   action        = "lambda:InvokeFunction"

@@ -115,6 +115,10 @@ locals {
   queue_url  = data.terraform_remote_state.queue.outputs.queue_url
   queue_arn  = data.terraform_remote_state.queue.outputs.queue_arn
   queue_name = element(split(":", local.queue_arn), length(split(":", local.queue_arn)) - 1)
+
+  eval_queue_url  = data.terraform_remote_state.queue.outputs.eval_queue_url
+  eval_queue_arn  = data.terraform_remote_state.queue.outputs.eval_queue_arn
+  eval_queue_name = element(split(":", local.eval_queue_arn), length(split(":", local.eval_queue_arn)) - 1)
 }
 
 # Default VPC networking: public subnets, no NAT, no ALB.
@@ -468,4 +472,251 @@ output "ecr_repository_url" {
 
 output "cluster_name" {
   value = aws_ecs_cluster.main.name
+}
+
+
+# --- Evaluator --------------------------------------------------------------
+#
+# The second worker. Everything here mirrors the ingestion worker except the
+# two things that differ, and those two are the whole point:
+#
+#   - it scales to eval_max_tasks, not 1, because it makes no upstream requests
+#   - it runs on 1 vCPU / 2 GB, because Stockfish is CPU-bound where ingestion
+#     waits on HTTP
+#
+# It shares the image, the cluster, the security group and the execution role.
+# Only the task role differs, because the permissions differ.
+
+variable "eval_max_tasks" {
+  description = <<-EOT
+    How many evaluators may run at once. Unlike the ingestion worker's
+    max_capacity this IS a tuning knob: evaluation touches nothing outside the
+    account, so the only cost of getting it wrong is money.
+
+    Ten is chosen for latency, not throughput. Concurrency is free in total
+    cost - Fargate bills per vCPU-second, so ten tasks for a tenth of the time
+    is the same bill - but ten IDLE tasks are ~108 USD/month against a ~2 USD
+    budget, which is why scale-to-zero matters more here than anywhere else.
+  EOT
+  type        = number
+  default     = 10
+}
+
+variable "eval_depth" {
+  description = <<-EOT
+    Stockfish search depth. Chosen by measurement: benchmarked over 1,047 plies
+    of real games, depth 8 finds 53% of depth-18's blunders and reports half
+    the true average centipawn loss, and depth 12 reaches 65%. Chess.com's own
+    Game Review runs 18-30 by membership tier.
+
+    Cost is controlled by bounding the GAMES (last 100 per time control), not
+    the depth - that is what makes full depth affordable.
+  EOT
+  type        = number
+  default     = 18
+}
+
+resource "aws_cloudwatch_log_group" "evaluator" {
+  name              = "/ecs/chess-cloud-evaluator"
+  retention_in_days = 14
+}
+
+resource "aws_iam_role" "evaluator_task" {
+  name = "chess-cloud-evaluator-task"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Effect    = "Allow"
+      Principal = { Service = "ecs-tasks.amazonaws.com" }
+      Action    = "sts:AssumeRole"
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "evaluator_task" {
+  name = "evaluator"
+  role = aws_iam_role.evaluator_task.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes"]
+        Resource = local.eval_queue_arn
+      },
+      {
+        Effect = "Allow"
+        # Query to select a player's games, UpdateItem to write evals onto them
+        # one game at a time. No BatchWriteItem: a game is the unit of work, so
+        # writing it alone is what keeps a crash from losing more than one.
+        # No PutItem or DeleteItem - the evaluator adds fields to rows that
+        # ingestion owns, and must never create or destroy them.
+        Action   = ["dynamodb:Query", "dynamodb:UpdateItem"]
+        Resource = local.table_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
+        Resource = "${aws_cloudwatch_log_group.evaluator.arn}:*"
+      },
+    ]
+  })
+}
+
+resource "aws_ecs_task_definition" "evaluator" {
+  family                   = "chess-cloud-evaluator"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+
+  # 1 vCPU / 2 GB, four times the ingestion worker. Stockfish is CPU-bound
+  # where ingestion waits on HTTP, and the sizing is roughly cost-NEUTRAL:
+  # four times faster at four times the rate. So this buys latency, not
+  # throughput per dollar, which is the only reason to pick it.
+  cpu                = 1024
+  memory             = 2048
+  execution_role_arn = aws_iam_role.execution.arn
+  task_role_arn      = aws_iam_role.evaluator_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name      = "evaluator"
+      image     = "${aws_ecr_repository.worker.repository_url}:${var.image_tag}"
+      essential = true
+      # Same image as the ingestion worker, different entrypoint. They share a
+      # table, a row shape and an operational story; two images would be two
+      # things to keep in step for one differing line.
+      command = ["python", "-u", "evaluator.py"]
+      environment = [
+        { name = "EVAL_QUEUE_URL", value = local.eval_queue_url },
+        { name = "TABLE_NAME", value = local.table_name },
+        { name = "AWS_DEFAULT_REGION", value = var.region },
+        { name = "EVAL_DEPTH", value = tostring(var.eval_depth) },
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = aws_cloudwatch_log_group.evaluator.name
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "evaluator"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "evaluator" {
+  name            = "evaluator"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.evaluator.arn
+  desired_count   = 0
+
+  capacity_provider_strategy {
+    capacity_provider = var.use_spot ? "FARGATE_SPOT" : "FARGATE"
+    weight            = 1
+  }
+
+  network_configuration {
+    subnets          = data.aws_subnets.default.ids
+    security_groups  = [aws_security_group.worker.id]
+    assign_public_ip = true
+  }
+
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
+}
+
+resource "aws_appautoscaling_target" "evaluator" {
+  service_namespace  = "ecs"
+  resource_id        = "service/${aws_ecs_cluster.main.name}/${aws_ecs_service.evaluator.name}"
+  scalable_dimension = "ecs:service:DesiredCount"
+
+  # Zero is as load-bearing here as on the ingestion worker, and costs more to
+  # get wrong: ten idle tasks at this size are ~108 USD/month.
+  min_capacity = 0
+  max_capacity = var.eval_max_tasks
+}
+
+resource "aws_appautoscaling_policy" "evaluator_scale_out" {
+  name               = "evaluator-queue-has-work"
+  policy_type        = "StepScaling"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.evaluator.resource_id
+  scalable_dimension = aws_appautoscaling_target.evaluator.scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Maximum"
+
+    # One player per message, so queue depth is exactly the number of players
+    # waiting. A few waiting gets a few workers; more than five goes straight
+    # to the ceiling rather than climbing one step at a time.
+    step_adjustment {
+      metric_interval_lower_bound = 0
+      metric_interval_upper_bound = 5
+      scaling_adjustment          = 2
+    }
+    step_adjustment {
+      metric_interval_lower_bound = 5
+      scaling_adjustment          = var.eval_max_tasks
+    }
+  }
+}
+
+resource "aws_appautoscaling_policy" "evaluator_scale_in" {
+  name               = "evaluator-queue-empty"
+  policy_type        = "StepScaling"
+  service_namespace  = "ecs"
+  resource_id        = aws_appautoscaling_target.evaluator.resource_id
+  scalable_dimension = aws_appautoscaling_target.evaluator.scalable_dimension
+
+  step_scaling_policy_configuration {
+    adjustment_type         = "ExactCapacity"
+    cooldown                = 60
+    metric_aggregation_type = "Maximum"
+
+    step_adjustment {
+      metric_interval_upper_bound = 0
+      scaling_adjustment          = 0
+    }
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "eval_queue_has_work" {
+  alarm_name          = "chess-cloud-eval-queue-has-work"
+  alarm_description   = "Players waiting for evaluation - start evaluators"
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = local.eval_queue_name }
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  alarm_actions       = [aws_appautoscaling_policy.evaluator_scale_out.arn]
+  treat_missing_data  = "notBreaching"
+}
+
+resource "aws_cloudwatch_metric_alarm" "eval_queue_empty" {
+  alarm_name        = "chess-cloud-eval-queue-empty"
+  alarm_description = "Evaluation queue empty - scale to zero"
+  namespace         = "AWS/SQS"
+  metric_name       = "ApproximateNumberOfMessagesVisible"
+  dimensions        = { QueueName = local.eval_queue_name }
+  statistic         = "Maximum"
+  period            = 60
+
+  # A message here can be in flight for hours while the queue reads empty, so
+  # scaling in on an empty queue alone would SIGTERM a task partway through a
+  # player. The evaluator handles that - it finishes the game in hand and lets
+  # the message replay - but the wasted work is real, so the window is the
+  # same conservative one the ingestion worker uses.
+  evaluation_periods  = var.scale_in_minutes
+  threshold           = 1
+  comparison_operator = "LessThanThreshold"
+  alarm_actions       = [aws_appautoscaling_policy.evaluator_scale_in.arn]
+  treat_missing_data  = "breaching"
 }
