@@ -56,7 +56,8 @@ Phase 3 left the backend genuinely ready for this, and the frontend now exists. 
 - [x] **Login** — Amplify `<Authenticator>` on the one screen behind the JWT authorizer. Reads stay public; only submit needs a token.
 - [x] **Partial data is the normal state, and the page is built for it.** Totals are over COMPLETE months only, so they climb as months land; the progress bar appears only while `pending > 0`; a failed poll renders "retrying" beside stale data rather than replacing the page with an error.
 - [x] **Player directory** (`/players`) — not in the original plan. The player page needs you to already know a username; this hands out the list, and makes the "analysis is public shared data" decision visible rather than merely stated.
-- [ ] **Decide whether the games list needs its own URL.** It is currently in-page state, so a player's games cannot be linked to directly and are lost on refresh. Only worth doing if sharing a view matters — see the deep-link drill below, which tests `/player/:platform/:username` because that is the deepest link the app has.
+- [x] **Games list stays on the player page, with no URL of its own.** Built as a separate `/games` route, then reverted: measuring what the URL would link *to* showed there was nothing worth linking. A page loads in a fraction of a second, so there is no long-lived scroll position to share, and the accumulating "load more" state cannot be honestly encoded in a URL anyway — a page number drifts as months complete, and an archive would put months back in front of the user. One page, one URL.
+- [x] **Totals are withheld until every month is in.** Mid-ingest they are not a partial view of the answer but a different, smaller one that looks identical: totals cover COMPLETE months only, so a win rate over 3 of 230 months is a number someone will read and believe. Gated on `pending`, which counts PENDING only — gating on "not COMPLETE" would mean the player with 8 permanently-404 archives never sees totals at all.
 
 **Two corrections to what this section used to say.** Both were plans the build deliberately departed from, left here uncorrected until now:
 
@@ -130,8 +131,8 @@ Same standard as every prior phase: watched live, not asserted.
 - [ ] **CORS preflight** — confirm the browser's `OPTIONS` is answered, not just the `GET`.
 - [ ] **Expired token** mid-session → the page recovers rather than silently failing.
 - [ ] **Submitting a bad username** → the `404` surfaces as a message, not a broken page.
-- [ ] **Watching a fan-out live** — submit a long-lived player and watch months fill in.
-- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik`) → CloudFront serves the app, not a 404. This is the deepest link the app has: the games list is in-page state, so there is no month URL to test.
+- [x] **Watching a fan-out live** — ✓ 26 Aug 2026, unplanned. `theohwk` sat at 22 PENDING months and 0 games, which looked like a stuck ingest and was not: the `queue_has_work` alarm is `period = 60`, `evaluation_periods = 1`, and SQS publishes queue depth on a lag of its own, so scale-out trails a submit by a minute or two. Autoscaling set desired count to 1 at 13:17:10 and all 22 months drained to COMPLETE — **1,502 games** — within a few minutes. The directory row showing 0% was an accurate picture of a real intermediate state, which is what that UI is for. Also the first live exercise of the withheld-totals state above.
+- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik`) → CloudFront serves the app, not a 404. This is the deepest link the app has, by decision rather than by omission — see the games-list item above.
 
 ---
 
