@@ -95,13 +95,65 @@ SK  GAME#2026-08#996120144       <- ~906 B: the existing row + evals + acpl
 | **Store only classified moves** (blunders, mistakes, turning points) | ~20x smaller and probably enough for the dashboard, which is the actual product. Cut because it trades away the eval graph permanently, and per-game items make the full series affordable anyway. Still the fallback if evaluation cost forces a retreat. |
 | **Raise the item limit** | Not possible at any price. 400 KB is a fixed service characteristic, not a quota — it does not appear in Service Quotas and has no support path. Confirmed against the API. |
 
+## Two operations, not one
+
+**Decided.** Fetching a profile and analysing a game are separate requests with separate limits. This is the shape that makes the cost controllable without making the product useless to a new visitor.
+
+| | Profile fetch (`POST /games`) | Game analysis (new route) |
+|---|---|---|
+| What it does | Archive list, months, per-game rows, counts | Stockfish over one game's plies |
+| Engine | **No** | Yes |
+| Talks to Chess.com | Yes — stays serialised, `max_capacity = 1` | **No** — reads the stored PGN |
+| Unverified user | Unrestricted | **One game at a time** |
+| Verified user | Unrestricted | Bulk |
+
+**The basic statistics are always shown.** Counts, W/D/L, colours, time controls, rating range — everything Phase 3 built — need no engine and stay open to everyone. Evaluation statistics are a *second* group on the page, populated only for games actually analysed. An unverified visitor still gets a real dashboard rather than a locked door, which is a better split than the model it borrows from: OpenDota gates its only product, this gates the expensive half of two.
+
+- [ ] **Separate the routes.** `POST /games` stays engine-free ingestion. Evaluation moves to its own per-game request against an already-ingested game.
+- [ ] **Gate on the existing `verified` flag.** Phase 2 already built `LINK#<platform>` items carrying `verified` — the primitive exists, so this is wiring rather than new infrastructure.
+- [ ] **Verify Chess.com accounts with a profile token.** The user pastes a one-time token into their profile `location` field; one call to the public profile endpoint confirms it, the link is marked verified, and they clear the field. Chess.com's OAuth is approval-gated and Phase 2 declined to apply, recording "revisit only if a feature appears that genuinely requires a verified Chess.com link" — this is that feature, and the profile-token route needs nobody's approval.
+- [ ] **Any user may analyse any player.** Verification lifts the concurrency limit; it does not restrict *whose* games may be submitted. Analysis stays public shared data, so a popular player is evaluated once for everyone — which is also a real cost saving.
+
+## Store the PGNs
+
+**Decided, and it is what makes scaling safe.** Evaluation must not re-fetch moves from Chess.com: that would put the engine back behind the serialised worker pin and undo the reason for splitting the two.
+
+- [ ] **Ingestion stores the PGN on the game item.** Measured: mean **3,151 B**, max 8,872 B, so a game item goes from 138 B to ~3.3 KB — **0.8% of the item limit**. Impossible before the migration: 8.9 MB of PGN for the heaviest month could never have shared one item.
+
+| Storage at $0.25/GB-month | | |
+|---|---|---|
+| Everything currently ingested (147,214 games) | 0.48 GB | **$0.12/mo** |
+| 1,000 users × 3,000 games | 9.9 GB | **$2.47/mo** |
+| 10,000 users × 3,000 games | 98.7 GB | $24.67/mo |
+
+**Storage is the one cost here that recurs.** Compute is one-off per game — evaluate once, keep the result — but PGNs bill every month whether anyone analyses them or not. Noise at current scale; past a few thousand users it becomes the dominant line item, and it arrives whether or not anybody uses the engine.
+
+## Scale the evaluation workers
+
+**Decided.** Evaluation gets its own queue and service, autoscaled beyond one task.
+
+**The worker pin does not apply to it, and that is the point.** `max_capacity = 1` exists to protect Chess.com's API — serialised access, an IP ban as the failure mode money cannot undo. Evaluation reads a stored PGN and runs a local binary, making **zero upstream requests**, so the constraint that forces serialisation is absent. This is the scaling question PHASE-F.md could not resolve, and it dissolves not by establishing Chess.com's limit but by removing Chess.com from the path.
+
+**Concurrency buys latency, not cost.** Fargate bills per vCPU-second, so ten workers for a tenth of the time costs the same as one. Measured on Stockfish 17 at 0.25 vCPU, depth 8, scaled to the project mean of 177 plies:
+
+| | 1 worker | 10 workers | Cost |
+|---|---|---|---|
+| theohwk (1,502 games) | 19 min | 2 min | $0.00 |
+| erik (16,321) | 3.4 hr | 20 min | $0.05 |
+| danielnaroditsky (129,391) | 1.1 days | 2.7 hr | $0.41 |
+| **Everything ingested (147,214)** | 31 hr | **3.1 hr** | **$0.46** |
+
+- [ ] **Separate queue and service**, so ingestion stays pinned at 1 and evaluation scales independently.
+- [ ] **Scale to zero is now load-bearing twice over.** Ten idle evaluation tasks at 1 vCPU / 2 GB are **$3.61/day — $108/month** against a ~$2 budget. `check-drift.sh` already asserts `MinCapacity == 0` per service, so a new service is covered automatically; confirm it fires rather than assuming.
+- [ ] **Verify the parallel speed-up rather than assuming it.** The arithmetic assumes ten tasks each get a full vCPU; Spot contention is unmeasured.
+
 ## The engine
 
 - [ ] **Stockfish in the image.** The Dockerfile already anticipates this and says the image "stays this shape" — an apt or copy layer. Confirm licence terms (GPL) are compatible with how this is deployed.
 - [ ] **One engine process, reused.** The skill's stated reason for Fargate over Lambda is "warm engine process between games". Starting Stockfish per game would throw that away.
-- [ ] **Decide the analysis depth or time budget per move.** This is the single biggest cost lever in the phase — it multiplies by every ply of every game of every month. Not a detail to leave to a default.
+- [ ] **Decide the analysis depth.** Measured on Stockfish 17, one thread, 64 MB hash, at 0.25 vCPU — **depth 8: 17 ms/ply, depth 10: 49, depth 12: 139, depth 15: 395**. At the project mean of 177 plies that is 3.0 / 8.7 / 24.5 / 69.8 seconds per game. Depth 8 is the working assumption: a blunder is a large eval swing and does not need deep search, while deeper search finds *subtle* errors the dashboard is not about. **Confirm depth 8 actually catches blunders before committing** — a quality question, not a cost one.
 - [ ] **Decide what happens to already-COMPLETE months.** 500+ months are ingested and counted but not evaluated. Re-evaluating them is the expensive pass; a `COMPLETE` month that has no evals is a *different* state from one that does, and the item needs to say which.
-- [ ] **Decide whether every game is evaluated.** A player with 129,391 games is not a hypothetical — danielnaroditsky is already in the table. Evaluating all of them at any depth is the dominant cost of this project.
+- [x] **Every game is evaluated** — for verified users, in bulk. Unverified users get one game at a time, which bounds the exposure. Cost per user is ~**$0.01** for a typical 3,000-game player at depth 8; the risk was never a single user but an open door, and the verification gate closes it.
 
 ## Task sizing — the cost model changes here
 
