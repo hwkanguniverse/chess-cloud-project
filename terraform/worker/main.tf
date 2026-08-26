@@ -256,7 +256,19 @@ resource "aws_iam_role_policy" "task" {
         # read is what makes a conditional request possible, so without this
         # permission every message fails - and fails *generically*, retrying
         # five times into the DLQ as though Chess.com were down.
-        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
+        #
+        # BatchWriteItem and Query arrived with per-game items: the worker
+        # writes each game as its own item and Queries the month's prefix to
+        # find stale ones left by a longer previous fetch. Both are distinct
+        # IAM actions - BatchWriteItem is not covered by PutItem or
+        # UpdateItem, and granting the wrong one fails exactly as described
+        # above, which is how this was found.
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:BatchWriteItem",
+          "dynamodb:Query",
+        ]
         Resource = local.table_arn
       },
     ]
