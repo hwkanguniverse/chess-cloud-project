@@ -191,6 +191,9 @@ export default function Player() {
   const failed = months.filter((m) => m.status === "FAILED").length;
   const more = cursor.current < complete;
   const percent = Math.round((complete / Math.max(months.length, 1)) * 100);
+  // Still ingesting. FAILED months are not pending - a player with one archive
+  // Chess.com will never serve would otherwise never show totals at all.
+  const loading = data.pending > 0;
 
   return (
     <section>
@@ -209,6 +212,18 @@ export default function Player() {
 
       {error && <p className="notice warn">{error} — retrying</p>}
 
+      {/* Totals are withheld until every month is in. They are only ever
+          computed over COMPLETE months, so mid-ingest they are not a partial
+          view of the answer - they are a different, smaller answer that looks
+          exactly like the real one. A win rate over 3 of 230 months is a
+          number someone will read and believe. The progress bar above is the
+          loading state; these appear when they mean something. */}
+      {loading ? (
+        <p className="stats-pending muted">
+          Reading {months.length.toLocaleString()} months of history&hellip;
+          Totals appear once every month is in.
+        </p>
+      ) : (
       <div className="stats">
         <Stat label="Games" value={totals.games.toLocaleString()} />
         <Stat
@@ -240,8 +255,9 @@ export default function Player() {
           }
         />
       </div>
+      )}
 
-      {Object.keys(totals.byClass ?? {}).length > 0 && (
+      {!loading && Object.keys(totals.byClass ?? {}).length > 0 && (
         <div className="breakdown">
           <span className="label">By time control</span>
           <span className="muted small">

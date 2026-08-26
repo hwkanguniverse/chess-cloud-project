@@ -239,6 +239,15 @@ a:hover {
   margin-bottom: var(--sp-8);
 }
 
+/* Stands in for the stat row during an ingest. Given the same vertical space
+   the stats will occupy, so the page does not jump when they arrive. */
+.stats-pending {
+  padding: var(--sp-6) 0 var(--sp-8);
+  border-bottom: 1px solid var(--border);
+  margin-bottom: var(--sp-6);
+  font-size: var(--fs-sm);
+}
+
 /* --- Tables --------------------------------------------------------------- */
 /* Two long lists carry this app - the directory and the games list - so the
    table is the main data surface rather than a supporting element. Numbers are
