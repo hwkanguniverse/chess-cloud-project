@@ -67,11 +67,18 @@ else
         --service-namespace ecs --region "$REGION" \
         --resource-ids "$RES" \
         --query 'ScalableTargets[0].MaxCapacity' --output text 2>/dev/null)
-      case "$MAX" in
-        1)         ok "$(basename "$S") pinned to one task - ingestion stays serialised" ;;
-        None|"")   : ;; # already reported by the MinCapacity check above
-        *)         flag "$(basename "$S") max capacity is $MAX, not 1 - parallel requests risk an IP ban" ;;
-      esac
+      # Only the ingestion worker. The evaluator reads stored PGNs and makes
+      # no upstream requests at all, so serialisation buys nothing there and
+      # its ceiling is a cost decision rather than a safety one.
+      if [ "$(basename "$S")" = "worker" ]; then
+        case "$MAX" in
+          1)         ok "$(basename "$S") pinned to one task - ingestion stays serialised" ;;
+          None|"")   : ;; # already reported by the MinCapacity check above
+          *)         flag "$(basename "$S") max capacity is $MAX, not 1 - parallel requests risk an IP ban" ;;
+        esac
+      else
+        ok "$(basename "$S") max capacity $MAX - no upstream calls, so not pinned"
+      fi
     done
   done
 fi
