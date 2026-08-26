@@ -77,7 +77,7 @@ Chess.com's Published Data API is public, unauthenticated and explicitly sanctio
 - [x] **Decided what "analysed" means without an engine** — counted, not evaluated: games, W/D/L, colours split, time-control split, rating min/max/last per month, and cumulative totals across months. Real numbers a dashboard can show, demonstrable without Stockfish.
 - [x] **Store a summary row per game**, not the PGN: date, opponent, both ratings, colour, result, time control, game URL. 179 bytes each. Full move data is Phase 4's problem, under Phase 4's storage decision.
 - [x] **Confirmed the 400KB item limit holds** — measured against the live API, not estimated. Heaviest month sampled from `hikaru` (18 months, 2025-03 → 2026-08) was 828 games. Summary rows: **179 bytes/game, 145KB, 36% of the item limit**, ceiling ~2,288 games per month. Re-measure before adding any field to the row — the first cut of the row was 243 B/game and 49% of the limit.
-- [ ] **Opening name deferred, not rejected.** Chess.com's `eco` field is a URL ending in the opening *name*, not the ECO code — up to 66 characters, which alone was a third of the item budget. Cut because nothing reads it yet. Opening statistics are a real thing to show a player; if they come back, they need their own storage decision rather than a field on every row.
+- [x] **Opening name deferred, not rejected.** Chess.com's `eco` field is a URL ending in the opening *name*, not the ECO code — up to 66 characters, which alone was a third of the item budget. Cut because nothing reads it yet. Opening statistics are a real thing to show a player; if they come back, they need their own storage decision rather than a field on every row.
 - [x] **Full PGNs are impossible in one item, confirmed** — that same archive is **3.4MB raw**, over 8x the limit. The summary-row decision is now measured rather than assumed.
 
 ## ETag caching — the cost story
@@ -162,9 +162,9 @@ Same standard as Phases 1 and 2: drills, watched live, not assertions. Drilled a
   | Same history re-submitted, all cached | **$0.0002** |
 
   **The 155x gap is the phase's cost story in one number.** Ingestion itself is free in practice; the work is too cheap to be worth optimising further.
-- [ ] Confirm ingestion stays inside the free tier. The outbound calls are free; the Fargate time is the cost, and it is per-second.
-- [ ] Re-run `scripts/check-drift.sh` after each apply.
-- [ ] Worker back to zero tasks after every drill. **An idle task at this size is ~$12/month** — against $0.028 for a player's entire history, which is the whole point: idle time is the only cost that can hurt. (The ~$44 figure carried from earlier phases was for a larger task size; corrected here.)
+- [x] **Ingestion cost confirmed — but "free tier" was the wrong frame.** Fargate has no free tier, so there was no allowance to stay inside. Checked against Cost Explorer for August 2026: 0.33 vCPU-hours and 0.66 GB-hours, billing $0.00 — the worker runs on **FARGATE_SPOT** (see `terraform/worker/main.tf`), where this volume rounds to nothing. The real statement is that ingestion rounds to zero, not that an allowance absorbs it.
+- [x] Re-run `scripts/check-drift.sh` after each apply. Standing rule, not a task — clean after Phase 3's applies.
+- [x] **Worker back to zero tasks.** Verified 26 Aug 2026: service `worker` at desired 0, running 0, no tasks in the cluster. Idle time is the only cost that can hurt — against $0.028 for a player's entire history. **The ~$12/month idle figure is the on-demand price; the worker runs on Spot, so it is roughly 70% less.** (The ~$44 figure carried from earlier phases was for a larger task size.)
 
 ---
 

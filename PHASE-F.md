@@ -29,16 +29,16 @@ Run `bash scripts/check-drift.sh` after every apply.
 
 ## Where things stand
 
-Phase 3 left the backend genuinely ready for this. What is missing is everything a browser needs.
+Phase 3 left the backend genuinely ready for this, and the frontend now exists. What is missing is everything that would let anyone *else* reach it.
 
 | | Status |
 |---|---|
 | Ingestion, ETag caching, failure handling | Done and drilled |
 | Player and month read routes | Live, unauthenticated, public by design |
 | Cognito pool, JWT authorizer, SRP login | Live since Phase 2 |
+| Frontend | **Built** — submit, player dashboard, games list, directory, login. Runs on localhost only |
 | **CORS** | **Absent entirely.** No browser on another origin can call the API |
-| **Callback URL** | Parked at `localhost:3000` — Phase 2 anticipated exactly this phase |
-| **Any frontend** | Does not exist |
+| **Hosting** | Nothing. No domain, no certificate, no bucket, no distribution |
 | **Per-user rate limits** | None. The 10 req/s throttle is shared across all callers |
 | **Spending stop** | None. The $5 budget is a *forecast alert* — it emails, it does not stop |
 
@@ -48,11 +48,20 @@ Phase 3 left the backend genuinely ready for this. What is missing is everything
 
 **What it is for:** the aggregate dashboard is the product, per the skill. The data exists — 149 months and 129,391 games for one player already in the table — and nothing can display it.
 
-- [ ] **Submit page** — one input (Chess.com username), posts to `/games`, shows what came back (`archives`, `queued`, `skipped`, `refreshed`).
-- [ ] **Player dashboard** — polls `/player/{platform}/{username}`, renders cumulative totals and the per-month list, filling in as workers finish. This is the screen that makes fan-out legible.
-- [ ] **Month drill-down** — `/analysis/{platform}/{username}/{yyyy-mm}` for one month's games. The skill calls the single-game view a supporting screen: build the thinnest thing that works.
-- [ ] **Login** — Cognito Hosted UI, authorization-code flow with PKCE, token held in memory. Reads stay public and unauthenticated; only submit needs a token.
-- [ ] **Decide what the page shows while 200 months are pending.** Partial data is the normal state here, not an edge case.
+**Built, and running locally only.** Three routes in [App.tsx](web/src/App.tsx) over a token-based component set. Nothing below is reachable by anyone else until Hosting and CORS exist — that is the whole of what stands between this and a usable site.
+
+- [x] **Submit page** — one input (Chess.com username), posts to `/games`, shows what came back, then navigates to the player page after 1.2s so the counts are readable rather than flashing past. Username is validated client-side against a copy of `USERNAME_RE` from `submit.py` — a convenience to avoid an obvious round trip, not a control.
+- [x] **Player dashboard** — polls `/player/{platform}/{username}`, renders cumulative totals and a progress bar that fills as workers finish.
+- [x] **The games list is flat, not per-month.** Months are the *fetch* unit, never a presentation unit: `loadMore()` walks completed archives newest-first purely as a pagination source and concatenates them into one reverse-chronological list. Each batch is sorted before appending, so the list stays ordered without ever re-sorting thousands of rendered rows.
+- [x] **Login** — Amplify `<Authenticator>` on the one screen behind the JWT authorizer. Reads stay public; only submit needs a token.
+- [x] **Partial data is the normal state, and the page is built for it.** Totals are over COMPLETE months only, so they climb as months land; the progress bar appears only while `pending > 0`; a failed poll renders "retrying" beside stale data rather than replacing the page with an error.
+- [x] **Player directory** (`/players`) — not in the original plan. The player page needs you to already know a username; this hands out the list, and makes the "analysis is public shared data" decision visible rather than merely stated.
+- [ ] **Decide whether the games list needs its own URL.** It is currently in-page state, so a player's games cannot be linked to directly and are lost on refresh. Only worth doing if sharing a view matters — see the deep-link drill below, which tests `/player/:platform/:username` because that is the deepest link the app has.
+
+**Two corrections to what this section used to say.** Both were plans the build deliberately departed from, left here uncorrected until now:
+
+- It specified a **month drill-down at `/analysis/{platform}/{username}/{yyyy-mm}`**. That was the storage shape leaking into the product — the same mistake the Phase 3 log already rejected when submit moved from player-month to username-only. The backend splits by month because the player route projects the games arrays away (145KB per month); the *user* has no month-shaped question. Built as pagination instead.
+- It specified the **Cognito Hosted UI with authorization-code + PKCE**. Built with Amplify's `<Authenticator>` over SRP instead: the pool allows only `ALLOW_USER_SRP_AUTH` and `ALLOW_REFRESH_TOKEN_AUTH`, the password never reaches Cognito, and sign-up, confirmation and password reset come from one element. Consequence to keep in view: **there is no hosted callback URL in this design**, so the `localhost:3000` callback parked in Phase 2 is not what unblocks login in production — the app client's allowed origins are.
 
 ## Hosting
 
@@ -69,6 +78,7 @@ Phase 3 left the backend genuinely ready for this. What is missing is everything
 **What it is for:** each item below is a thing that is currently safe *only because there is one user*.
 
 - [ ] **CORS on the API.** Nothing works in a browser without it. Allow the real origin explicitly — not `*` — since the authenticated routes carry a bearer token.
+- [ ] **Decide what happens to the unused Hosted UI.** `terraform/auth` still provisions the whole authorization-code setup — a Cognito domain, `allowed_oauth_flows = ["code"]`, and callback URLs parked at `localhost:3000` — but the app signs in with Amplify SRP and never visits it. It is live, publicly reachable, and can create real accounts in the pool by a path the app does not control. Either delete it or state why it stays; leaving a second front door open by accident is the kind of thing this section exists to catch.
 - [ ] **Per-user rate limiting.** The stage throttle (10 req/s) is shared, so one person's polling loop degrades the site for everyone. Bound a single caller, not just the total.
 - [ ] **Worker concurrency pinned at 1.** *Chosen guard for the upstream.* Serialised ingestion is currently a property of the autoscaling max rather than an enforced invariant — make it explicit, because "scale the worker out" is the optimisation that would silently break the constraint Chess.com actually cares about. See the scaling note below for what to do when one worker is no longer enough.
 - [ ] **A real spending stop.** Decide what happens when the budget is exceeded rather than forecast-exceeded. The current alert emails and nothing else.
@@ -110,7 +120,7 @@ Not a safety problem — nothing breaks, nothing is banned, the bill stays trivi
 - [ ] Confirm the total stays where it should: **under ~$2/month** — CloudFront + S3 pennies, hosted zone ~$0.50, ingestion effectively free ($0.028 per player's entire history).
 - [ ] **Deliberately not buying:** WAF (~$5–8/month, more than the entire current spend). Revisit if abuse actually appears.
 - [ ] Domain registration is the real recurring cost, and it is annual not monthly.
-- [ ] Worker back to zero tasks after every drill. An idle task is ~$12/month and remains the one cost mistake that matters.
+- [ ] Worker back to zero tasks after every drill. Remains the one cost mistake that matters. ~$12/month is the *on-demand* price of an idle task; the worker runs on FARGATE_SPOT, so the real figure is roughly 70% less — still the largest avoidable line item in a ~$2/month budget.
 
 ## Failure paths to drill
 
@@ -121,7 +131,7 @@ Same standard as every prior phase: watched live, not asserted.
 - [ ] **Expired token** mid-session → the page recovers rather than silently failing.
 - [ ] **Submitting a bad username** → the `404` surfaces as a message, not a broken page.
 - [ ] **Watching a fan-out live** — submit a long-lived player and watch months fill in.
-- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik`) → CloudFront serves the app, not a 404.
+- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik`) → CloudFront serves the app, not a 404. This is the deepest link the app has: the games list is in-page state, so there is no month URL to test.
 
 ---
 
