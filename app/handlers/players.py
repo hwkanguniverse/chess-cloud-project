@@ -25,6 +25,7 @@ import os
 from decimal import Decimal
 
 import boto3
+from boto3.dynamodb.conditions import Attr
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 
@@ -60,6 +61,12 @@ def handler(event, context):
     # deserialising megabytes of JSON it will throw away.
     scan = {
         "ProjectionExpression": "PK, #a, #s, summary.games, analysedAt",
+        # Months only. Games are their own items now, and a Scan sees every
+        # item in the table - without this the month count becomes the game
+        # count, which for a 129,391-game player is off by three orders of
+        # magnitude. Filtered server-side so the games are not shipped back
+        # here just to be discarded.
+        "FilterExpression": Attr("SK").begins_with("ARCHIVE#"),
         "ExpressionAttributeNames": {"#a": "archive", "#s": "status"},
     }
 

@@ -396,8 +396,12 @@ resource "aws_iam_role_policy" "status" {
     Version = "2012-10-17"
     Statement = [
       {
-        Effect   = "Allow"
-        Action   = ["dynamodb:GetItem"]
+        Effect = "Allow"
+        # GetItem for the month, Query for its games. Games are their own
+        # items now, so reading a month is one GetItem plus a paginated Query
+        # over the GAME# prefix - a distinct IAM action, and read-only either
+        # way. Still no write of any kind: status reads.
+        Action   = ["dynamodb:GetItem", "dynamodb:Query"]
         Resource = local.table_arn
       },
       {

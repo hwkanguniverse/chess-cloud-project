@@ -31,6 +31,7 @@ import urllib.error
 import urllib.request
 
 import boto3
+from boto3.dynamodb.conditions import Key
 
 QUEUE_URL = os.environ["QUEUE_URL"]
 TABLE_NAME = os.environ["TABLE_NAME"]
@@ -225,6 +226,70 @@ def aggregate(rows):
     return totals
 
 
+def _game_sk(archive, row):
+    """Sort key for one game: GAME#<yyyy-mm>#<id>.
+
+    The archive is *in* the key so a month's games stay contiguous and can be
+    read with one begins_with Query. The id is the trailing path segment of
+    the Chess.com game URL, which is stable and unique per game; a game with
+    no URL falls back to its end time, which is not guaranteed unique but is
+    the only other thing on the row that identifies it.
+    """
+    url = (row.get("url") or "").rstrip("/")
+    game_id = url.rsplit("/", 1)[-1] if url else str(row.get("end") or "0")
+    return f"GAME#{archive}#{game_id}"
+
+
+def write_games(platform, username, archive, rows):
+    """One item per game, replacing the games array that used to live on the
+    month item.
+
+    Why not one item per month: a game averages 177 plies, so per-ply
+    evaluations are ~975KB for the heaviest real month against a 400KB item
+    limit that is fixed and cannot be raised. Splitting by game puts each item
+    at well under a kilobyte. It also fixes a limit already being approached
+    without any engine - that month stored 2,815 games as ~380KB, 95% of the
+    limit.
+
+    Idempotent by key: a replayed message rewrites the same items with the
+    same content. Stale games from a previous, longer fetch are deleted
+    afterwards rather than left to accumulate, because a re-fetch can return
+    fewer games than before - a game can be removed from an archive.
+    """
+    pk = f"PLAYER#{platform}#{username}"
+    written = set()
+
+    with table.batch_writer() as batch:
+        for row in rows:
+            sk = _game_sk(archive, row)
+            written.add(sk)
+            batch.put_item(Item={"PK": pk, "SK": sk, **row})
+
+    # Anything under this month's prefix that this fetch did not write is left
+    # over from a previous one. Query for keys only - the games themselves are
+    # not needed to decide what to remove.
+    stale = []
+    kwargs = {
+        "KeyConditionExpression": Key("PK").eq(pk)
+        & Key("SK").begins_with(f"GAME#{archive}#"),
+        "ProjectionExpression": "SK",
+    }
+    while True:
+        page = table.query(**kwargs)
+        stale.extend(
+            i["SK"] for i in page.get("Items", []) if i["SK"] not in written
+        )
+        if "LastEvaluatedKey" not in page:
+            break
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+    if stale:
+        print(f"removing {len(stale)} stale games from {archive}", flush=True)
+        with table.batch_writer() as batch:
+            for sk in stale:
+                batch.delete_item(Key={"PK": pk, "SK": sk})
+
+
 def process(message):
     body = json.loads(message["Body"])
     analysis_id = body["id"]
@@ -282,19 +347,28 @@ def process(message):
     totals = aggregate(rows)
     now = int(time.time())
 
-    # One write. Games, aggregate, ETag and status land together, so there is
-    # no window in which the item claims COMPLETE without the data behind it.
+    # Games go to their own items, then the month is marked COMPLETE. The
+    # order is the durability argument, and it replaces the single-write one:
+    # a crash between the two leaves the month not-COMPLETE with some game
+    # items already written, so the message replays and overwrites them by the
+    # same keys. A crash cannot leave COMPLETE visible without its games.
+    #
+    # The reverse order would be wrong in a way that is invisible until it
+    # happens - COMPLETE with a partial or empty games list, and nothing to
+    # say so.
+    write_games(platform, username, archive, rows)
+
     table.update_item(
         Key=key,
         UpdateExpression=(
-            "SET #s = :s, summary = :summary, games = :games, "
-            "etag = :etag, analysedAt = :t, checkedAt = :t, lastCheckHit = :h"
+            "SET #s = :s, summary = :summary, "
+            "etag = :etag, analysedAt = :t, checkedAt = :t, lastCheckHit = :h "
+            "REMOVE games"
         ),
         ExpressionAttributeNames={"#s": "status"},
         ExpressionAttributeValues={
             ":s": "COMPLETE",
             ":summary": totals,
-            ":games": rows,
             ":etag": new_etag,
             ":t": now,
             ":h": False,
