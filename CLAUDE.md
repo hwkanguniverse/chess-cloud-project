@@ -70,10 +70,10 @@ Fetching a profile and analysing a game are separate requests with separate limi
 | What it does | Archive list, months, per-game rows, counts | Stockfish over one game's plies |
 | Engine | **No** | Yes |
 | Talks to Chess.com | Yes — stays serialised, `max_capacity = 1` | **No** — reads the stored PGN |
-| Unverified user | Unrestricted | **One game at a time** |
-| Verified user | Unrestricted | Bulk |
+| Bound | Chess.com's rate | Last 100 games per time control |
+| Who may | Anyone registered | Anyone registered, rate-limited |
 
-**The basic statistics are always shown.** Everything Phase 3 built needs no engine and stays open to everyone; evaluation statistics are a *second* group on the page, populated only for games actually analysed. An unverified visitor gets a real dashboard rather than a locked door — a better split than the model it borrows from, which gates its only product.
+**The basic statistics are always shown.** Everything Phase 3 built needs no engine and stays open to everyone; evaluation statistics are a *second* group on the page, populated only for games actually analysed. The split still matters even without a verification gate: profile fetch is unbounded and cheap, analysis is bounded and expensive, and they answer to different limits.
 
 ### Store the PGNs
 
@@ -93,34 +93,73 @@ Measured: PGNs are **3,151 B mean**, max 8,872 B — a game item goes from 138 B
 
 **The worker pin does not apply to evaluation, and that is the point.** `max_capacity = 1` exists to protect Chess.com's API — an IP ban is the failure mode money cannot undo. Evaluation reads a stored PGN and runs a local binary, making **zero upstream requests**. This is the scaling question [PHASE-F.md](PHASE-F.md) could not resolve, and it dissolves not by establishing Chess.com's limit but by removing Chess.com from the path.
 
-**Concurrency buys latency, not cost** — Fargate bills per vCPU-second. Measured on Stockfish 17 at 0.25 vCPU, depth 8, scaled to the project mean of 177 plies:
+**Concurrency buys latency, not cost** — Fargate bills per vCPU-second. At depth 18 (55.6 sec/game at 1 vCPU) with the last-100-per-control cap:
 
-| | 1 worker | 10 workers | Cost |
-|---|---|---|---|
-| theohwk (1,502 games) | 19 min | 2 min | $0.00 |
-| erik (16,321) | 3.4 hr | 20 min | $0.05 |
-| danielnaroditsky (129,391) | 1.1 days | 2.7 hr | $0.41 |
-| **Everything ingested (147,214)** | 31 hr | **3.1 hr** | **$0.46** |
+| | Games | 1 worker | 10 workers | Cost |
+|---|---|---|---|---|
+| theohwk | 227 | 3.5 hr | 21 min | $0.053 |
+| danielnaroditsky | 318 | 4.9 hr | 29 min | $0.074 |
+| erik | 361 | 5.6 hr | 33 min | $0.084 |
 
-### Every game is evaluated
+**Ten workers is what makes depth 18 usable.** Half an hour is a wait someone will tolerate for a full-depth report; five hours is not.
 
-For verified users, in bulk; unverified users get one game at a time, which bounds the exposure. Cost is ~**$0.01** per typical 3,000-game player at depth 8. **The risk was never a single user but an open door** — at ~200 users the ~$2/month budget breaks, and the verification gate is what closes it.
+### The last 100 games per time control, at depth 18
+
+**Not every game, and not a shallow depth.** Both halves of the earlier plan were wrong, and measuring is what showed it.
+
+**Depth 8 does not work.** Benchmarked against depth 18 over 10 real games (1,047 plies):
+
+| Depth | Blunders found | Missed | False+ | Recall | Avg centipawn loss |
+|---|---|---|---|---|---|
+| 8 | 32 | **24** | 5 | **53%** | 111.7 cp |
+| 12 | 40 | 18 | 7 | 65% | 143.1 cp |
+| 18 | 51 | 0 | 0 | 100% | **217.2 cp** |
+
+The reasoning behind depth 8 — "a blunder is a large eval swing and does not need deep search" — sounded right and is false: a shallow engine does not *see* the refutation, so the position does not look bad to it yet. It misses nearly half of real blunders, and on the looser mistakes band **46% of what it flags is not a mistake at all**. Worse, it reports roughly **half** the true average centipawn loss, which makes the dashboard's headline number flattering rather than merely imprecise. Chess.com uses depth 18–30 depending on tier.
+
+**Bounding the games instead of the depth is what makes depth 18 affordable.** 100 games per time control, at $0.00023/game:
+
+| | Games | Cost |
+|---|---|---|
+| erik | 361 | $0.084 |
+| danielnaroditsky | 318 | $0.074 |
+| theohwk | 227 | $0.053 |
+| **Worst case** (4 controls × 100) | 400 | **$0.093** |
+
+**Per time control, not overall**, because a player's last 100 games overall can be entirely one control — theohwk's would be nearly all rapid, hiding 437 blitz games. 4× the cost of last-100-overall and worth it.
+
+**danielnaroditsky stops being expensive.** 129,391 games becomes 318, the same as everyone else. The outlier problem this phase kept running into simply disappears.
+
+### No verification — the bound is the work, not the asker
+
+**Cut.** The profile-token flow, the `verified` gate and the one-at-a-time restriction all existed to stop a single user running up unbounded cost. With a fixed per-player ceiling there is no unbounded cost to run up.
+
+Three things bound it together:
+
+1. **A hard cap per player** — 100 games per time control, so no player is expensive
+2. **Skip already-evaluated games** — a player is paid for once, ever, by whoever asks first
+3. **Analysis is keyed by player, not user** — Phase 3's decision, now doing double duty
+
+**Re-submitting an already-analysed player costs $0.00.** The only way to spend money is submitting *distinct, never-before-analysed* players, and the dedup improves with use: the more players analysed, the more submissions are free.
+
+**The residual risk is scripted distinct usernames** — 10,000 players is $930 worst case. That is what a **rate limit** handles, which [PHASE-F.md](PHASE-F.md) already lists as owed and which is cheaper to build than verification. A registered account plus N submissions per hour is the whole control.
 
 ---
 
 ## To build
 
-### Verification
+### Bounding the work
 
-- [ ] **Profile-token verification for Chess.com.** The user pastes a one-time token into their profile `location` field; one call to the public profile endpoint confirms it, the link is marked verified, and they clear the field. Chess.com's OAuth is approval-gated and Phase 2 declined to apply, recording "revisit only if a feature appears that genuinely requires a verified Chess.com link" — **this is that feature**, and the profile-token route needs nobody's approval.
-- [ ] **Gate on the existing `verified` flag.** Phase 2 already built `LINK#<platform>` items carrying it, so this is wiring rather than new infrastructure.
-- [ ] **Any user may analyse any player.** Verification lifts the concurrency limit; it does not restrict *whose* games may be submitted. Analysis stays public shared data, so a popular player is evaluated once for everyone — itself a real cost saving.
+- [ ] **Select the last 100 games per time control** for a player, newest first, and evaluate only those.
+- [ ] **Skip games that already have evals.** This is what makes re-submission free, and it must be **per game, not per player**: a player analysed last month has 100 evaluated games, but their newest 100 now includes games played since. Per-player skipping would never pick up new games; per-game re-evaluates only the delta, typically a handful. The same insight as the ETag, one layer down.
+- [ ] **Rate limit on submit** — a registered account plus N submissions per hour. This replaces verification entirely and is already owed to [PHASE-F.md](PHASE-F.md), so it is one control serving two purposes.
+- [ ] **Any user may analyse any player.** Analysis stays public shared data, so a popular player is evaluated once for everyone.
 
 ### The engine
 
 - [ ] **Stockfish in the image.** The Dockerfile already anticipates this and says the image "stays this shape" — an apt or copy layer. Confirm the GPL terms are compatible with how this is deployed.
 - [ ] **One engine process, reused.** The skill's stated reason for Fargate over Lambda is "warm engine process between games". Starting Stockfish per game throws that away.
-- [ ] **Confirm depth 8 actually catches blunders.** Measured at 0.25 vCPU: **depth 8: 17 ms/ply, 10: 49, 12: 139, 15: 395** — 3.0 / 8.7 / 24.5 / 69.8 seconds per game at the project mean. Depth 8 is the working assumption because a blunder is a large eval swing and does not need deep search. **This is a quality question, not a cost one**, and it is the one number here chosen without evidence.
+- [x] **Depth settled at 18** — measured, not assumed. See the settled section above for the recall numbers that ruled out 8 and 12. 55.6 sec/game at 1 vCPU.
 - [ ] **Separate route** for per-game analysis, against an already-ingested game.
 - [ ] **Ingestion stores the PGN** on the game item.
 
@@ -184,13 +223,16 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 | Fetch vs analyse | Two operations, separate limits — bulk analysis needs a verified account, one game at a time otherwise | One submit that both fetches and evaluates; a per-user monthly quota; verified-users-only | Evaluation is ~1,000× the cost of ingestion per game, so they cannot share a limit. Splitting keeps the free half genuinely useful — the counted statistics need no engine — so a new visitor sees a real dashboard rather than a locked door. A quota bounds spend but not concurrency; verified-only bounds both and kills casual use. |
 | PGN storage | Store the PGN on the game item at ingestion | Re-fetch the game from Chess.com when it is analysed | Re-fetching puts evaluation back behind the serialised worker pin, which is the whole thing the split exists to escape. Storing costs 0.8% of an item and $0.12/month for everything ingested today — and it is the reason evaluation can scale at all. |
 | Evaluation concurrency | Its own queue and service, scaled past one task | Reuse the ingestion worker and its pin | The pin protects Chess.com, and evaluation makes zero upstream requests. Concurrency buys latency at no extra cost, because Fargate bills per vCPU-second. |
+| Analysis depth | **18**, matching Chess.com's Platinum tier | Depth 8; depth 12; a two-pass depth-8-screen-then-deep design | Measured over 1,047 plies against depth 18: depth 8 recalls **53%** of blunders and reports **half** the true average centipawn loss; depth 12 reaches 65%. A cheap statistic nobody can trust is not a saving. Depth 8 also *invents* mistakes — 46% of its flags are not mistakes at 18 — and telling a user they blundered when they did not is worse than silence. |
+| What gets evaluated | **The last 100 games per time control** | Every game; last 100 overall; recent months only | Bounding the games rather than the depth is what makes depth 18 affordable — worst case 400 games, **$0.093** per player, against $0.70 for every game. Per control rather than overall because a player's last 100 games can be entirely one control: theohwk's would be nearly all rapid, hiding 437 blitz games. It also makes the outlier problem disappear — danielnaroditsky's 129,391 games become 318, the same as everyone. |
+| Account verification | **Cut** — a registered account and a rate limit | Profile-token verification gating bulk analysis; Chess.com OAuth; Lichess link as proof | Verification existed to stop one user running up unbounded cost. With a hard per-player cap and per-game dedup there is no unbounded cost: re-submitting an analysed player is **$0.00**, and analysis is keyed by player rather than user, so a popular player is paid for once by whoever asks first. The residual risk is scripted distinct usernames, which a rate limit handles — and one was already owed to Phase F, so it is one control serving two purposes rather than a new feature. |
 
 ---
 
 ## Watch for
 
 - **The engine does not license more ingestion concurrency.** Evaluation scaling is safe *because it makes no upstream requests*. Ingestion's constraint is unchanged and is still the one risk money cannot undo.
-- **Depth is multiplicative.** Every increment applies to every ply of every game of every player. Depth 8 is chosen on cost and reasoning, not yet on evidence that it catches blunders.
+- **Depth was the wrong lever, and measuring is what showed it.** Depth 8 was chosen on cost and plausible reasoning, and benchmarking found 53% blunder recall and a headline centipawn figure off by half. The fix was bounding the *games* rather than the depth. Reasoning about engine behaviour without measuring it produced a confidently wrong answer here.
 - **Idle evaluation workers are the new worst cost mistake.** $108/month against a ~$2 budget — 30× worse than the ingestion worker ever was.
 - **Storage recurs where compute does not.** PGNs bill monthly whether or not anyone analyses them.
 - **"COMPLETE" changes meaning again**, for the third time. The item has to say which meaning applies.
