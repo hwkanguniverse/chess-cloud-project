@@ -143,11 +143,11 @@ def _upstream_message(exc):
 
 
 def summarise_game(game, username):
-    """One row per game: enough for a player page to list it, no moves.
+    """One row per game, with its moves.
 
-    ~243 bytes each, measured against a real archive. The game URL is the link
-    back to Chess.com for anyone who wants the moves, which is what keeps a
-    828-game month inside one DynamoDB item.
+    ~3.3KB each: a 138 B summary plus the PGN. The summary is what a player
+    page lists; the PGN is what the evaluator reads. Storing it is what
+    decouples evaluation from Chess.com - see the pgn field below.
     """
     white = game.get("white") or {}
     black = game.get("black") or {}
@@ -157,6 +157,13 @@ def summarise_game(game, username):
     return {
         "url": game.get("url"),
         "end": game.get("end_time"),
+        # The moves, kept so evaluation never has to ask Chess.com again.
+        # That is the whole reason the engine can run on more than one task:
+        # the ingestion worker is pinned to protect their API, and an
+        # evaluator that reads stored PGNs makes no upstream requests at all.
+        # Measured at 3,151 B mean, which puts a game item at 0.8% of the
+        # 400KB limit - affordable only because games became their own items.
+        "pgn": game.get("pgn"),
         "colour": "w" if playing_white else "b",
         "result": me.get("result"),
         "rating": me.get("rating"),
