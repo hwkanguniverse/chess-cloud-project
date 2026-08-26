@@ -56,7 +56,7 @@ Phase 3 left the backend genuinely ready for this, and the frontend now exists. 
 - [x] **Login** — Amplify `<Authenticator>` on the one screen behind the JWT authorizer. Reads stay public; only submit needs a token.
 - [x] **Partial data is the normal state, and the page is built for it.** Totals are over COMPLETE months only, so they climb as months land; the progress bar appears only while `pending > 0`; a failed poll renders "retrying" beside stale data rather than replacing the page with an error.
 - [x] **Player directory** (`/players`) — not in the original plan. The player page needs you to already know a username; this hands out the list, and makes the "analysis is public shared data" decision visible rather than merely stated.
-- [x] **Games list has its own URL** — `/player/:platform/:username/games`. **The URL names the list, not a position in it:** a shared link opens at the newest page and paginates from there. Naming a position was rejected twice over — a page number drifts, because a month completing mid-ingest shifts what page three contains, and an archive would put months back in front of the user. The split also separates two loading concerns that were sharing one component: the player screen polls because it is where an ingest is watched, the games screen fetches its archive list once because a list growing under a reader mid-scroll is worse than one briefly stale.
+- [ ] **Decide whether the games list needs its own URL.** It is currently in-page state, so a player's games cannot be linked to directly and are lost on refresh. Only worth doing if sharing a view matters — see the deep-link drill below, which tests `/player/:platform/:username` because that is the deepest link the app has.
 
 **Two corrections to what this section used to say.** Both were plans the build deliberately departed from, left here uncorrected until now:
 
@@ -131,7 +131,7 @@ Same standard as every prior phase: watched live, not asserted.
 - [ ] **Expired token** mid-session → the page recovers rather than silently failing.
 - [ ] **Submitting a bad username** → the `404` surfaces as a message, not a broken page.
 - [ ] **Watching a fan-out live** — submit a long-lived player and watch months fill in.
-- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik/games`) → CloudFront serves the app, not a 404. Now a two-segment path under the player, which is the deepest the app goes — worth testing at that depth rather than one level up.
+- [ ] **Direct navigation to a deep link** (`/player/chesscom/erik`) → CloudFront serves the app, not a 404. This is the deepest link the app has: the games list is in-page state, so there is no month URL to test.
 
 ---
 

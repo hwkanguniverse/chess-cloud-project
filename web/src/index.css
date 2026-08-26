@@ -239,14 +239,6 @@ a:hover {
   margin-bottom: var(--sp-8);
 }
 
-/* The way through to the games list. Given room above and below because it is
-   the only navigation on the page, and a bare link tucked under the stats
-   reads as a footnote rather than as the next thing to do. */
-.games-link {
-  margin: var(--sp-8) 0;
-  font-size: var(--fs-sm);
-}
-
 /* --- Tables --------------------------------------------------------------- */
 /* Two long lists carry this app - the directory and the games list - so the
    table is the main data surface rather than a supporting element. Numbers are

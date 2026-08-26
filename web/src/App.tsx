@@ -14,7 +14,6 @@ import { Link, Route, Routes } from "react-router-dom";
 
 import Directory from "./screens/Directory";
 import Home from "./screens/Home";
-import Games from "./screens/Games";
 import Player from "./screens/Player";
 import UserMenu from "./components/UserMenu";
 
@@ -37,10 +36,6 @@ export default function App() {
           <Route path="/" element={<Home />} />
           <Route path="/players" element={<Directory />} />
           <Route path="/player/:platform/:username" element={<Player />} />
-          <Route
-            path="/player/:platform/:username/games"
-            element={<Games />}
-          />
           <Route path="*" element={<p className="empty">Nothing here.</p>} />
         </Routes>
       </main>
