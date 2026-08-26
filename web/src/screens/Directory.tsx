@@ -9,7 +9,6 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { listPlayers, type DirectoryEntry } from "../api";
-import { Badge, ProgressBar } from "../components/ui";
 
 function ago(seconds: number | null): string {
   if (!seconds) return "—";
@@ -72,17 +71,11 @@ export default function Directory() {
           <tr>
             <th>Player</th>
             <th className="num">Games</th>
-            <th></th>
             <th className="num">Analysed</th>
           </tr>
         </thead>
         <tbody>
           {players.map((player) => {
-            // Progress as a share of the work, not a count of archives - the
-            // archive is the worker's unit and stays out of the product.
-            const percent = Math.round(
-              (player.complete / Math.max(player.months, 1)) * 100,
-            );
             return (
               <tr key={`${player.platform}/${player.username}`}>
                 <td>
@@ -91,24 +84,6 @@ export default function Directory() {
                   </Link>
                 </td>
                 <td className="num">{player.games.toLocaleString()}</td>
-                <td style={{ width: "12rem" }}>
-                  {player.pending > 0 && (
-                    <span
-                      style={{
-                        display: "flex",
-                        alignItems: "center",
-                        gap: "var(--sp-3)",
-                      }}
-                    >
-                      <ProgressBar
-                        value={percent}
-                        height={6}
-                        style={{ maxWidth: "7rem" }}
-                      />
-                      <Badge tone="accent">{percent}%</Badge>
-                    </span>
-                  )}
-                </td>
                 <td className="num muted">{ago(player.lastAnalysedAt)}</td>
               </tr>
             );

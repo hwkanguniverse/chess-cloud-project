@@ -316,6 +316,20 @@ a:hover {
   padding: var(--sp-10) 0;
 }
 
+/* --- Ingest progress ------------------------------------------------------ */
+
+.progress-row {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-4);
+  margin: var(--sp-4) 0;
+}
+
+.progress-row .bar {
+  flex: 1;
+  max-width: 18rem;
+}
+
 /* A filled or hollow disc for the colour played - faster to scan down a column
    of a thousand rows than the words "white" and "black". */
 .disc {
