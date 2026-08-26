@@ -711,20 +711,49 @@ resource "aws_cloudwatch_metric_alarm" "eval_queue_has_work" {
   treat_missing_data  = "notBreaching"
 }
 
+# Visible messages ALONE are the wrong signal here, and this was found by
+# watching it fail: a task was killed six minutes into a three-hour job.
+#
+# ApproximateNumberOfMessagesVisible drops to zero the instant a worker
+# receives a message, so for the whole time the evaluator is working the queue
+# reads empty. The ingestion worker gets away with the same alarm because its
+# messages take about a second; this one holds a message for hours.
+#
+# Summing Visible + NotVisible counts work in flight as work, so the service
+# only scales in when nothing is queued AND nothing is being processed.
 resource "aws_cloudwatch_metric_alarm" "eval_queue_empty" {
   alarm_name        = "chess-cloud-eval-queue-empty"
-  alarm_description = "Evaluation queue empty - scale to zero"
-  namespace         = "AWS/SQS"
-  metric_name       = "ApproximateNumberOfMessagesVisible"
-  dimensions        = { QueueName = local.eval_queue_name }
-  statistic         = "Maximum"
-  period            = 60
+  alarm_description = "Evaluation queue empty and nothing in flight - scale to zero"
 
-  # A message here can be in flight for hours while the queue reads empty, so
-  # scaling in on an empty queue alone would SIGTERM a task partway through a
-  # player. The evaluator handles that - it finishes the game in hand and lets
-  # the message replay - but the wasted work is real, so the window is the
-  # same conservative one the ingestion worker uses.
+  metric_query {
+    id          = "total"
+    expression  = "visible + inflight"
+    label       = "Messages queued or in flight"
+    return_data = true
+  }
+
+  metric_query {
+    id = "visible"
+    metric {
+      namespace   = "AWS/SQS"
+      metric_name = "ApproximateNumberOfMessagesVisible"
+      dimensions  = { QueueName = local.eval_queue_name }
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
+  metric_query {
+    id = "inflight"
+    metric {
+      namespace   = "AWS/SQS"
+      metric_name = "ApproximateNumberOfMessagesNotVisible"
+      dimensions  = { QueueName = local.eval_queue_name }
+      period      = 60
+      stat        = "Maximum"
+    }
+  }
+
   evaluation_periods  = var.scale_in_minutes
   threshold           = 1
   comparison_operator = "LessThanThreshold"
