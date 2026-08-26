@@ -55,6 +55,23 @@ else
         None|"")   flag "$(basename "$S") has no autoscaling target - idle Fargate is ~\$44/mo" ;;
         *)         flag "$(basename "$S") min capacity is $MIN, not 0" ;;
       esac
+
+      # Max capacity is the upstream guard, and the only one here whose
+      # failure cannot be undone with money. Chess.com's rule is phrased per
+      # caller, so two tasks on different players are still two overlapping
+      # requests of ours; one task is the only configuration known to comply,
+      # and the cost of getting it wrong is an IP ban rather than a bill.
+      # The reasoning lives in terraform/worker/main.tf - this is the check
+      # that would notice it being raised by hand in the console.
+      MAX=$(aws application-autoscaling describe-scalable-targets \
+        --service-namespace ecs --region "$REGION" \
+        --resource-ids "$RES" \
+        --query 'ScalableTargets[0].MaxCapacity' --output text 2>/dev/null)
+      case "$MAX" in
+        1)         ok "$(basename "$S") pinned to one task - ingestion stays serialised" ;;
+        None|"")   : ;; # already reported by the MinCapacity check above
+        *)         flag "$(basename "$S") max capacity is $MAX, not 1 - parallel requests risk an IP ban" ;;
+      esac
     done
   done
 fi
