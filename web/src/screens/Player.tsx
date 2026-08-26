@@ -28,7 +28,7 @@ import {
   type Game,
   type PlayerResponse,
 } from "../api";
-import { Button, ProgressBar, ResultPill, Stat } from "../components/ui";
+import { Button, ResultPill, Stat } from "../components/ui";
 
 const POLL_MS = 5000;
 
@@ -190,7 +190,6 @@ export default function Player() {
   const complete = months.filter((m) => m.status === "COMPLETE").length;
   const failed = months.filter((m) => m.status === "FAILED").length;
   const more = cursor.current < complete;
-  const percent = Math.round((complete / Math.max(months.length, 1)) * 100);
   // Still ingesting. FAILED months are not pending - a player with one archive
   // Chess.com will never serve would otherwise never show totals at all.
   const loading = data.pending > 0;
@@ -200,23 +199,13 @@ export default function Player() {
       <h1>{username}</h1>
       <p className="muted">{platform}</p>
 
-      {data.pending > 0 && (
-        <div className="progress-row">
-          <span className="label">Reading history</span>
-          <span className="bar">
-            <ProgressBar value={percent} height={8} />
-          </span>
-          <span className="muted small">{percent}%</span>
-        </div>
-      )}
-
       {error && <p className="notice warn">{error} — retrying</p>}
 
       {/* Totals are withheld until every month is in. They are only ever
           computed over COMPLETE months, so mid-ingest they are not a partial
           view of the answer - they are a different, smaller answer that looks
           exactly like the real one. A win rate over 3 of 230 months is a
-          number someone will read and believe. The progress bar above is the
+          number someone will read and believe. The line below is the whole
           loading state; these appear when they mean something. */}
       {loading ? (
         <p className="stats-pending muted">
