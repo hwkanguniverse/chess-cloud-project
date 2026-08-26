@@ -27,32 +27,67 @@ Run `bash scripts/check-drift.sh` after every apply.
 
 ## The decision that comes before the engine
 
-**Per-ply evaluations do not fit the current item, and this is not close.** Measured against the numbers already established in Phase 3:
+**Per-ply evaluations do not fit the current item, and this is not close.** Measured live in August 2026 — Phase 3's own figures turned out to be conservative in both directions, so these replace them:
 
 | | |
 |---|---|
-| Heaviest month sampled | 828 games |
-| Plies at ~80/game | 66,240 |
-| At 8 bytes per eval | **518 KB** |
-| DynamoDB item limit | **400 KB** |
-| Already used by summary rows | 145 KB (36%) |
+| Heaviest month | danielnaroditsky 2024-03 — **2,815 games** (Phase 3 sampled 828) |
+| Mean plies per game | **177** (an early estimate of 80 was less than half) |
+| Plies in that month | **499,444** |
+| Evals at 2 B/ply | **975 KB** — 2.4× the whole limit |
+| DynamoDB item limit | **400 KB**, fixed and not adjustable |
+| That month's item **today** | **~380 KB — 95% of the limit**, game rows alone |
 
-So the evals alone exceed the limit before the existing rows are counted. Roughly **408 of 828 games** would fit in the remaining headroom. Phase 3 wrote down "full move data is Phase 4's problem, under Phase 4's storage decision" — this is that decision, and it has to be made before any engine code is written, because it determines what the worker writes.
+Evals exceed the entire limit before the existing rows are counted, so they cannot share the month item under any encoding. Phase 3 wrote "full move data is Phase 4's problem, under Phase 4's storage decision" — this is that decision, and it comes before any engine code because it determines what the worker writes.
 
-- [ ] **Decide where evaluations live.** The options and what each costs are in the storage section below. Nothing else in this phase can start until this is settled.
+**It is also more urgent than a planning item.** That 95% is true now, with no engine involved: the heaviest month is one growth spurt from failing to write, and Phase 3 has no failure path for an oversized item.
 
-## Storage — the options
+- [x] **Decided: one item per game.** `SK = GAME#<yyyy-mm>#<id>`, evals on the game item. Chosen over S3, compression and storing only classified moves — see the storage section and the decision log.
 
-**Not yet chosen.** Presented so the trade-offs are visible; the decision is the owner's.
+## Storage — one item per game
 
-| Option | Shape | Cost |
-|---|---|---|
-| **One item per game** | `PK = PLAYER#…`, `SK = GAME#<id>`, evals as a list on the game item | Natural fit — a game is the unit being evaluated. A month becomes a Query rather than a GetItem, so the month read changes shape. 828 items per heavy month. |
-| **Compress the evals** | Store per-ply evals as a packed binary blob on the existing item | Keeps one item per month. A 2-byte int per ply is 130KB for a heavy month — fits, but only just, and it is opaque to anything but our own code. |
-| **S3 for evals** | Evals as an object per month, DynamoDB holds a pointer | No size ceiling, cheap at rest. Adds S3 to a project that deliberately has none, and a second read to render a page. |
-| **Sample rather than store every ply** | Store only classified moves (blunders, mistakes, turning points) | The dashboard needs blunders and centipawn loss, not every eval. Far smaller. The eval *graph* would need the full series, so this trades a feature for simplicity. |
+**Decided.** The month item keeps its status, ETag and summary; each game becomes its own item carrying its own evals.
 
-**Worth noting before choosing:** the skill's product spec lists the eval graph as part of the single-game report, and calls the single-game view "a supporting screen — build the thinnest version that works, because Lichess already does it better". The aggregate dashboard is the product. That argues for storing what the *dashboard* needs and treating the full eval series as optional.
+```
+PK  PLAYER#chesscom#erik
+SK  ARCHIVE#2026-08              <- ~400 B: status, etag, checkedAt, summary
+                                    (no games array)
+
+PK  PLAYER#chesscom#erik
+SK  GAME#2026-08#996120144       <- ~906 B: the existing row + evals + acpl
+                                    + blunders
+```
+
+**Measured, not estimated.** Everything below is from the live API and the deployed table, August 2026.
+
+| | |
+|---|---|
+| Mean plies per game | **177** (median 167, max 557) |
+| Heaviest month | danielnaroditsky 2024-03 — **2,815 games, 499,444 plies**, 11.3 MB raw |
+| Per-game item | **906 B** = 138 B row + 177 evals × 4 B + 60 B keys |
+| That as a share of the item limit | **0.2%** |
+| Longest single game (557 plies) | 2.4 KB |
+
+**The ceiling stops being a design constraint.** The heaviest month becomes 2,490 KB spread over 2,815 items, none near the limit — instead of 380 KB crammed into one.
+
+**This fixes a problem that already exists.** `danielnaroditsky/2024-03` is at **~380 KB of the 400 KB limit today** — 95%, with no engine involved, measured as 47.5 RCUs on a GetItem. Phase 3 recorded a ceiling of "~2,288 games per month" from an estimate of 179 B/game; the real encoding is 138 B/game, so the ceiling arrived later than predicted but this month is already past the stated one. **A month roughly 5% heavier fails on write, and Phase 3 has no failure path for it** — it would surface as a generic worker error, retry three times, and land in the DLQ looking exactly like a Chess.com outage. See the failure paths below.
+
+**What it costs:**
+
+- **The month read becomes a Query.** `PK = PLAYER#… AND begins_with(SK, "GAME#<yyyy-mm>#")` — which is why the archive goes *in* the sort key, keeping a month contiguous. At 2,815 × 906 B that is 2.5 MB, over the **1 MB Query cap**, so it needs pagination. The same fix the player route already carries, and the same limit that silently truncated it in Phase 3.
+- **The write becomes many.** One `UpdateItem` becomes ~113 `BatchWriteItem` calls, and **Phase 3's atomicity argument does not survive unchanged**: today games, aggregate, ETag and status land in a single item write, so `COMPLETE` is never visible without its data. Across 2,816 items it can be. Preserved by *ordering* instead — write every game item first, flip the month to `COMPLETE` last — so a crash leaves the month not-COMPLETE and the message replays. That is the property to re-drill, not to assume.
+- **Evals ride on the game item and are projected away for list reads.** Keeping them on the item avoids a second read for the eval graph; a `ProjectionExpression` stops the games *list* dragging 177 numbers per game across the wire. Exactly the trick that made the player route 4x faster in Phase 3.
+
+**The ETag layer is untouched.** It stays on the month item, so a `304` still short-circuits before any game write happens.
+
+**Rejected:**
+
+| Option | Why not |
+|---|---|
+| **Evals in S3**, pointer in DynamoDB | Genuinely cheap — 16 MB gzipped for a 129,391-game player, **$0.0004/month**. But it splits one write across two stores, so the pointer and the object can disagree, and Phase 3's "no window where COMPLETE is visible without its data" would need re-arguing against a harder version of the problem. It also leaves the 95%-full month item exactly as it is. Worth revisiting only if per-ply data outgrows what a game item can hold. |
+| **Compress evals** into a packed blob on the month item | Keeps one item, but a heavy month is 975 KB of evals at 2 B/ply — **2.4× the entire limit** before the existing rows. Does not fit under any encoding, so this is not a close call. |
+| **Store only classified moves** (blunders, mistakes, turning points) | ~20x smaller and probably enough for the dashboard, which is the actual product. Cut because it trades away the eval graph permanently, and per-game items make the full series affordable anyway. Still the fallback if evaluation cost forces a retreat. |
+| **Raise the item limit** | Not possible at any price. 400 KB is a fixed service characteristic, not a quota — it does not appear in Service Quotas and has no support path. Confirmed against the API. |
 
 ## The engine
 
@@ -87,6 +122,7 @@ Same standard as every prior phase: watched live, not asserted.
 - [ ] **A month that times out** — evaluation is far slower than ingestion, so the visibility timeout that was ample for a fetch may not be.
 - [ ] **Re-submitting an evaluated month** → the ETag still short-circuits and nothing is re-evaluated.
 - [ ] **Crash mid-evaluation** → recovery does not double-count, same standard as the Phase 3 drill.
+- [ ] **A month that exceeds the item limit** → the failure Phase 3 has no path for. Fixed by per-game items, but drill it: the pre-migration behaviour is a generic write error retrying into the DLQ, indistinguishable from an upstream outage. Confirm the new shape has no equivalent cliff.
 
 ## Cost controls
 
@@ -108,7 +144,7 @@ Same standard as every prior phase: watched live, not asserted.
 
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
-| *(none yet — the storage decision is first)* | | | |
+| Where evaluations live | **One item per game** — `SK = GAME#<yyyy-mm>#<id>`, evals on the item, projected away for list reads | Evals in S3 with a DynamoDB pointer; a compressed blob on the month item; storing only classified moves; raising the limit | Per-ply evals cannot share the month item under any encoding — 975 KB against a 400 KB limit for the heaviest month, measured. Per-game items are 906 B, 0.2% of the limit, and the shape matches what the data actually is: a game is the unit being evaluated. It also fixes a live problem the engine did not create — that heaviest month is already at 95% of the limit with game rows alone. S3 was the close second and is genuinely cheap, but it splits one write across two stores and leaves the 95% item untouched. Raising the limit is not an option at any price: 400 KB is a fixed service characteristic, not an adjustable quota. |
 
 ---
 
