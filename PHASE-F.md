@@ -85,7 +85,12 @@ Phase 3 left the backend genuinely ready for this, and the frontend now exists. 
 - [ ] **Per-user rate limiting.** The stage throttle (10 req/s) is shared, so one person's polling loop degrades the site for everyone. Bound a single caller, not just the total.
 - [ ] **Worker concurrency pinned at 1.** *Chosen guard for the upstream.* Serialised ingestion is currently a property of the autoscaling max rather than an enforced invariant — make it explicit, because "scale the worker out" is the optimisation that would silently break the constraint Chess.com actually cares about. See the scaling note below for what to do when one worker is no longer enough.
 - [ ] **A real spending stop.** Decide what happens when the budget is exceeded rather than forecast-exceeded. The current alert emails and nothing else.
-- [ ] **Cognito signup is open** — confirmed decision. Consider email verification and whether an unverified account may submit.
+- [x] **An unverified account cannot submit.** Signup stays open; the gate is on submit, the one route that spends money, while reads stay open to everyone because the data is public either way.
+  - **The claim is not in the token, and that shaped the design.** `email_verified` is an *id* token claim; the gateway authorizes the *access* token, which carries `sub`, `scope`, `client_id` and `token_use` and nothing about the email. A first cut gated on the claim directly and would have rejected **every** caller, verified or not — caught before applying, by checking what the frontend actually sends.
+  - **So the user is looked up instead** — `AdminGetUser` on the sub, cached per execution environment, read-only IAM scoped to the one pool. Rejected: sending the id token, which authorizes with a token meant for the client; and a pre-token-generation Lambda to inject the claim, which needs the **ESSENTIALS** tier — a per-MAU charge against a ~$2/month budget, to move one boolean. The pool is deliberately LITE.
+  - **Fails closed** — a missing user, a missing attribute or an error looking one up all count as unverified.
+  - **Mostly defence in depth.** With `auto_verified_attributes = ["email"]` an unconfirmed account cannot sign in at all, so it never reaches submit. What this catches is narrower: an address changed after signup, or an account confirmed by an admin path.
+  - Drilled live 26 Aug 2026: verified sub → `202` with 22 archives; unknown sub → `403 email_unverified`; no token → `401` at the gateway.
 - [ ] **Review what a token can do.** Submit is the only authenticated route and it costs money per call. Reads are public and always were.
 
 ## Scaling the worker — staying at one, and why the obvious paths are unproven

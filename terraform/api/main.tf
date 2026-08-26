@@ -266,6 +266,15 @@ resource "aws_iam_role_policy" "submit" {
         Resource = local.queue_arn
       },
       {
+        Effect = "Allow"
+        # Submit gates on email_verified, which is an *id* token claim - the
+        # gateway authorizes the access token, which does not carry it. So the
+        # user is looked up instead. Read-only: this grants no ability to
+        # create, modify or delete a user.
+        Action   = ["cognito-idp:AdminGetUser"]
+        Resource = data.terraform_remote_state.auth.outputs.user_pool_arn
+      },
+      {
         Effect   = "Allow"
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.submit.arn}:*"
@@ -415,8 +424,9 @@ resource "aws_lambda_function" "submit" {
 
   environment {
     variables = {
-      TABLE_NAME = local.table_name
-      QUEUE_URL  = local.queue_url
+      TABLE_NAME   = local.table_name
+      QUEUE_URL    = local.queue_url
+      USER_POOL_ID = data.terraform_remote_state.auth.outputs.user_pool_id
       # Chess.com's API is unauthenticated, so this header is the only thing
       # identifying us to them. Set here rather than hardcoded so the contact
       # address can change without a code deploy.

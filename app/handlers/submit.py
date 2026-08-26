@@ -29,6 +29,7 @@ import boto3
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 QUEUE_URL = os.environ["QUEUE_URL"]
+USER_POOL_ID = os.environ["USER_POOL_ID"]
 
 # Chess.com's API is free and unauthenticated, so this header is the only thing
 # identifying us. They try to reach the contact address before blocking an IP.
@@ -41,6 +42,14 @@ API_ROOT = "https://api.chess.com/pub"
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 sqs = boto3.client("sqs")
+cognito = boto3.client("cognito-idp")
+
+# sub -> verified, for the life of this execution environment. A user does not
+# become unverified, so a cached True stays true; a cached False is not stored
+# at all, so someone who verifies mid-session is not locked out until the
+# container recycles. Bounded because a container is short-lived and one entry
+# is a string and a bool.
+_verified_subs = set()
 
 # Letters, digits, underscore, hyphen - the characters Chess.com allows.
 # Enforced because the username becomes part of both a partition key and a URL
@@ -76,6 +85,43 @@ def _caller_sub(event):
         event.get("requestContext", {}).get("authorizer", {}).get("jwt", {})
     ).get("claims", {})
     return claims.get("sub")
+
+
+def email_verified(user_id):
+    """Whether Cognito has confirmed this user owns their email address.
+
+    Looked up rather than read from the token, and that is the whole reason
+    this function exists. `email_verified` is an *id* token claim; the gateway
+    authorizes the *access* token, which carries sub, scope, client_id and
+    token_use and nothing about the email. Gating on a claim that never
+    arrives would reject every caller.
+
+    The alternatives were worse. Sending the id token instead would authorize
+    with a token meant for the client, and putting the claim in the access
+    token needs a pre-token-generation Lambda, which requires the ESSENTIALS
+    tier - a per-MAU charge against a budget of about two dollars a month, to
+    move one boolean. This is one call on a route that already spends seconds
+    fanning out, so it is bought cheaply.
+
+    Fails closed: an error looking the user up is treated as unverified.
+    """
+    if user_id in _verified_subs:
+        return True
+
+    try:
+        user = cognito.admin_get_user(UserPoolId=USER_POOL_ID, Username=user_id)
+    except cognito.exceptions.UserNotFoundException:
+        return False
+    except Exception:
+        return False
+
+    for attribute in user.get("UserAttributes", []):
+        if attribute.get("Name") == "email_verified":
+            if str(attribute.get("Value", "")).strip().lower() == "true":
+                _verified_subs.add(user_id)
+                return True
+            return False
+    return False
 
 
 def list_archives(username):
@@ -229,6 +275,22 @@ def handler(event, context):
         # function is invoked. It fires only if a route is misconfigured
         # without an authorizer, so fail closed.
         return _response(401, {"error": "unauthenticated"})
+
+    # Submit is the one route that spends money - it fans a username out into
+    # ~200 fetches. Reads stay open to everyone because the data is public
+    # either way, so this gates who can start work, not who can see it.
+    #
+    # Largely defence in depth: an unconfirmed account cannot sign in at all,
+    # so it cannot reach here. What this catches is the narrower case - an
+    # address changed after signup, or an account confirmed by an admin path.
+    if not email_verified(user_id):
+        return _response(
+            403,
+            {
+                "error": "verify your email address before submitting",
+                "code": "email_unverified",
+            },
+        )
 
     try:
         body = json.loads(event.get("body") or "{}")

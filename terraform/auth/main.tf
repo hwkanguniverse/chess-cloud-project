@@ -193,6 +193,11 @@ output "user_pool_client_id" {
   value       = aws_cognito_user_pool_client.web.id
 }
 
+output "user_pool_arn" {
+  description = "User pool ARN. Scopes the submit role's AdminGetUser to this pool."
+  value       = aws_cognito_user_pool.main.arn
+}
+
 output "issuer" {
   description = "JWT issuer URL. The API authorizer validates tokens against this."
   value       = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.main.id}"

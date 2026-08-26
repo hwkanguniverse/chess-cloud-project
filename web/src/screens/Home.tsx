@@ -49,7 +49,9 @@ function SubmitForm() {
         err instanceof ApiError
           ? err.status === 404
             ? `No such player on Chess.com: ${name}`
-            : err.message
+            : err.status === 403
+              ? "Confirm your email address before submitting - check your inbox for the code Cognito sent when you signed up."
+              : err.message
           : "Could not reach the API.",
       );
     } finally {
