@@ -59,23 +59,6 @@ variable "access_token_hours" {
   default     = 1
 }
 
-variable "callback_url" {
-  description = <<-EOT
-    Where the hosted UI sends the user back after login, carrying the
-    authorization code. localhost while there is no deployed frontend - the
-    skill caps the frontend at "a page that posts and polls", so this changes
-    only when that page is actually hosted.
-  EOT
-  type        = string
-  default     = "http://localhost:3000/callback"
-}
-
-variable "logout_url" {
-  description = "Where the hosted UI returns the user after sign-out."
-  type        = string
-  default     = "http://localhost:3000/"
-}
-
 variable "refresh_token_days" {
   description = <<-EOT
     Lifetime of the refresh token, i.e. how long before a user must log in
@@ -151,16 +134,24 @@ resource "aws_cognito_user_pool_client" "web" {
 
   generate_secret = false
 
-  # Authorization code flow only. The implicit flow returns tokens directly in
-  # the URL fragment, where they land in browser history and Referer headers;
-  # it is deprecated for exactly that reason.
-  allowed_oauth_flows                  = ["code"]
-  allowed_oauth_flows_user_pool_client = true
-  allowed_oauth_scopes                 = ["openid", "email"]
-  supported_identity_providers         = ["COGNITO"]
+  # No OAuth flows and no hosted UI. The app signs in with SRP through Amplify,
+  # which renders sign-in, sign-up, confirmation and password reset itself, so
+  # the authorization-code path was a second way into this pool that nothing
+  # used - a publicly reachable signup page the app did not control. Removed
+  # rather than left dormant; see PHASE-F.md.
+  #
+  # Set empty rather than omitted. Dropping these attributes from the config
+  # leaves whatever was last applied in place, so the client kept advertising
+  # the code flow and a localhost callback after the domain was destroyed -
+  # inert without a domain, but exactly the stale config that misleads someone
+  # reading the console later.
+  allowed_oauth_flows                  = []
+  allowed_oauth_scopes                 = []
+  allowed_oauth_flows_user_pool_client = false
+  callback_urls                        = []
+  logout_urls                          = []
 
-  callback_urls = [var.callback_url]
-  logout_urls   = [var.logout_url]
+  supported_identity_providers = ["COGNITO"]
 
   access_token_validity  = var.access_token_hours
   id_token_validity      = var.access_token_hours
@@ -190,17 +181,6 @@ resource "aws_cognito_user_pool_client" "web" {
   ]
 }
 
-# --- Hosted UI -------------------------------------------------------------
-
-# Cognito serves the login, signup, verification and password-reset screens.
-# The skill explicitly caps the frontend at "a page that posts and polls", so
-# hand-building those five screens would be scope creep into the one area it
-# told us not to build.
-resource "aws_cognito_user_pool_domain" "main" {
-  domain       = "chess-cloud-961868442307"
-  user_pool_id = aws_cognito_user_pool.main.id
-}
-
 # --- Outputs ---------------------------------------------------------------
 
 output "user_pool_id" {
@@ -216,9 +196,4 @@ output "user_pool_client_id" {
 output "issuer" {
   description = "JWT issuer URL. The API authorizer validates tokens against this."
   value       = "https://cognito-idp.${var.region}.amazonaws.com/${aws_cognito_user_pool.main.id}"
-}
-
-output "hosted_ui_url" {
-  description = "Hosted UI login URL for the web client."
-  value       = "https://${aws_cognito_user_pool_domain.main.domain}.auth.${var.region}.amazoncognito.com/login?client_id=${aws_cognito_user_pool_client.web.id}&response_type=code&scope=openid+email&redirect_uri=${urlencode(var.callback_url)}"
 }

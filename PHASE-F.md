@@ -79,7 +79,9 @@ Phase 3 left the backend genuinely ready for this, and the frontend now exists. 
 **What it is for:** each item below is a thing that is currently safe *only because there is one user*.
 
 - [ ] **CORS on the API.** Nothing works in a browser without it. Allow the real origin explicitly — not `*` — since the authenticated routes carry a bearer token.
-- [ ] **Decide what happens to the unused Hosted UI.** `terraform/auth` still provisions the whole authorization-code setup — a Cognito domain, `allowed_oauth_flows = ["code"]`, and callback URLs parked at `localhost:3000` — but the app signs in with Amplify SRP and never visits it. It is live, publicly reachable, and can create real accounts in the pool by a path the app does not control. Either delete it or state why it stays; leaving a second front door open by accident is the kind of thing this section exists to catch.
+- [x] **Unused Hosted UI deleted, 26 Aug 2026.** Phase 2 built both login paths — SRP for programmatic access and the Hosted UI for browsers. The frontend then used Amplify's `<Authenticator>`, which is SRP, leaving the hosted path a publicly reachable signup page the app did not control. Verified live at `200` before removal and unreachable after. The pool, its users and their `sub`s are untouched: the domain is a front end onto the pool, not the pool itself.
+  - **Setting the OAuth attributes empty was a separate step from deleting the domain.** Dropping them from the Terraform config left whatever was last applied in place, so the client went on advertising `allowed_oauth_flows = ["code"]` and a `localhost:3000` callback after the domain was gone. Inert without a domain, but the kind of stale config that misleads whoever reads the console next. Omitting an attribute is not the same as clearing it.
+  - **Lichess account linking is untouched.** `link.py` runs its own authorization-code flow against *Lichess* — its own `state`, its own PKCE verifier, its own callback. The name is the only thing it shares with the Cognito path.
 - [ ] **Per-user rate limiting.** The stage throttle (10 req/s) is shared, so one person's polling loop degrades the site for everyone. Bound a single caller, not just the total.
 - [ ] **Worker concurrency pinned at 1.** *Chosen guard for the upstream.* Serialised ingestion is currently a property of the autoscaling max rather than an enforced invariant — make it explicit, because "scale the worker out" is the optimisation that would silently break the constraint Chess.com actually cares about. See the scaling note below for what to do when one worker is no longer enough.
 - [ ] **A real spending stop.** Decide what happens when the budget is exceeded rather than forecast-exceeded. The current alert emails and nothing else.
@@ -109,6 +111,14 @@ That matters because it kills the intuitive scaling story. "Multiple workers, on
 | DynamoDB lock per username | Conditional write claims the player before fetching, released after. | Distributed locking, with lease expiry and crash-holding-the-lock to answer. |
 
 **There is no throughput problem today.** One worker drained 230 months in ~3 minutes and 149 in about the same. The trigger to revisit is *drain time becoming visible to users* — and even then, the first action is asking Chess.com, not raising `max_capacity`.
+
+## Identity is coupled to the Cognito `sub`
+
+**Worth knowing before going public, not a problem yet.** Linked accounts are stored under `PK = USER#<cognito-sub>`, and `sub` is issued by the user pool per user. It survives password resets, email changes and login-method changes — but **not deletion and recreation**. A user deleted from the pool and signed up again with the same email gets a *new* `sub`, and their linked accounts become unreachable items under the old key.
+
+Nothing reads those orphans and they carry no TTL, so they sit in the table indefinitely. At the current size that is invisible; it is recorded because the failure is silent — the user sees an account with nothing linked and no error, which is a confusing thing to debug from the outside.
+
+Not fixed now. The options if it ever matters: key linked accounts by verified email instead of `sub`, which trades one coupling for another; or delete the user's items as part of deleting the user, which needs something to own that cleanup. Both are decisions for whenever account deletion becomes a real feature — there is currently no way for a user to delete their own account at all.
 
 ## Known limitation, accepted knowingly
 
