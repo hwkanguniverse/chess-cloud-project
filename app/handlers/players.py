@@ -13,7 +13,7 @@ players - one busy player adds ~200 archive items that this route must read
 and discard on every single call.
 
 The replacement is a GSI keyed for listing, and it is planned rather than
-hypothetical - see the decision log in CLAUDE.md. It was deferred so the
+hypothetical - see the decision log in PHASE-3.md. It was deferred so the
 directory could be watched working (and watched getting slower) before the
 index was added, rather than the index being asserted up front.
 

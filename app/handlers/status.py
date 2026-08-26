@@ -17,7 +17,7 @@ token, so requiring one here would protect nothing that is not already open.
 
 Consequences worth knowing: reads are not attributable to a user, and the
 stage throttle is the only thing bounding this route. Both are accepted - see
-the decision log in CLAUDE.md.
+the decision log in PHASE-3.md.
 """
 
 import json

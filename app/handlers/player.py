@@ -13,7 +13,7 @@ risk, in exchange for nothing. Computing on read is also correct for partial
 progress by construction: the totals cover exactly the months that are done.
 
 Analysis is public and this route is unauthenticated, for the same reason the
-per-month route is - see status.py and the decision log in CLAUDE.md.
+per-month route is - see status.py and the decision log in PHASE-3.md.
 """
 
 import json
