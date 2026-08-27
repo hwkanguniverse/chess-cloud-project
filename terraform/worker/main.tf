@@ -504,13 +504,24 @@ variable "eval_max_tasks" {
     max_capacity this IS a tuning knob: evaluation touches nothing outside the
     account, so the only cost of getting it wrong is money.
 
-    Ten is chosen for latency, not throughput. Concurrency is free in total
-    cost - Fargate bills per vCPU-second, so ten tasks for a tenth of the time
-    is the same bill - but ten IDLE tasks are ~108 USD/month against a ~2 USD
-    budget, which is why scale-to-zero matters more here than anywhere else.
+    Concurrency is free in total cost - Fargate bills per vCPU-second, so
+    eight tasks for an eighth of the time is the same bill - but eight IDLE
+    tasks are ~87 USD/month against a ~2 USD budget, which is why
+    scale-to-zero matters more here than anywhere else.
+
+    EIGHT, NOT TEN, AND THE NUMBER IS NOT ARBITRARY. The account's "Fargate
+    Spot vCPU resource count" quota is 8, and each task takes 1 vCPU. Asking
+    for 10 does not simply get 8: ECS retries the unplaceable tasks forever,
+    the scaling activity stays InProgress, and Application Auto Scaling will
+    not start a scale-IN while one is unresolved. So the service sticks at 8
+    running tasks indefinitely - the exact idle-cost failure this variable
+    exists to bound.
+
+    Raise this only alongside the quota, which is adjustable via Service
+    Quotas. Above the quota the ceiling is not a ceiling, it is a deadlock.
   EOT
   type        = number
-  default     = 10
+  default     = 8
 }
 
 variable "eval_depth" {
@@ -559,12 +570,22 @@ resource "aws_iam_role_policy" "evaluator_task" {
       },
       {
         Effect = "Allow"
-        # Query to select a player's games, UpdateItem to write evals onto them
-        # one game at a time. No BatchWriteItem: a game is the unit of work, so
-        # writing it alone is what keeps a crash from losing more than one.
-        # No PutItem or DeleteItem - the evaluator adds fields to rows that
-        # ingestion owns, and must never create or destroy them.
-        Action   = ["dynamodb:Query", "dynamodb:UpdateItem"]
+        # GetItem reads the one game a message names; UpdateItem writes its
+        # evals back. Query went with the per-player design, where the worker
+        # selected its own work - selection now happens in the analyse Lambda,
+        # so the worker only ever touches the game it is handed.
+        #
+        # GetItem had to be added when messages became per-game, and was not:
+        # every worker failed on the first message. A sixth IAM action learned
+        # the same way as the others, and the pattern is now unmistakable -
+        # changing what a component *does* changes what it may do, and the
+        # policy is a separate edit that nothing local will catch.
+        #
+        # Still no BatchWriteItem: a game is the unit of work, so writing it
+        # alone keeps a crash from losing more than one. Still no PutItem or
+        # DeleteItem - the evaluator adds fields to rows ingestion owns, and
+        # must never create or destroy them.
+        Action   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
         Resource = local.table_arn
       },
       {
@@ -674,6 +695,9 @@ resource "aws_appautoscaling_policy" "evaluator_scale_out" {
       metric_interval_lower_bound = 5
       scaling_adjustment          = var.eval_max_tasks
     }
+    # Note: this asks for exactly eval_max_tasks, so that value must stay at
+    # or below the Fargate Spot vCPU quota divided by the task size. See the
+    # variable for what happens when it does not.
   }
 }
 
