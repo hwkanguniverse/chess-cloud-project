@@ -144,6 +144,17 @@ data "terraform_remote_state" "auth" {
   }
 }
 
+variable "eval_depth" {
+  description = <<-EOT
+    Stockfish search depth, mirrored from the worker module. This route uses it
+    only to decide which games still need evaluating; the evaluator owns the
+    setting itself. The two must agree, or selection queues games the worker
+    thinks are done.
+  EOT
+  type        = number
+  default     = 18
+}
+
 locals {
   table_name = data.terraform_remote_state.data.outputs.table_name
   table_arn  = data.terraform_remote_state.data.outputs.table_arn
@@ -271,10 +282,12 @@ resource "aws_iam_role_policy" "analyse" {
       },
       {
         Effect = "Allow"
-        # SendMessage only - one player, one message. No SendMessageBatch here
-        # because there is nothing to batch, unlike submit which fans a player
-        # out into a message per month.
-        Action   = ["sqs:SendMessage"]
+        # Both, because this fans a player out into one message per game and
+        # batches them ten at a time. SendMessageBatch is a distinct IAM
+        # action rather than a variant of SendMessage - granting only the
+        # latter fails every fan-out, which this project has been caught by
+        # once already.
+        Action   = ["sqs:SendMessage", "sqs:SendMessageBatch"]
         Resource = local.eval_queue_arn
       },
       {
@@ -476,14 +489,18 @@ resource "aws_lambda_function" "analyse" {
 
   runtime = "python3.13"
   handler = "analyse.handler"
-  # One Query and one SendMessage. Nothing outbound, unlike submit, which is
-  # why this keeps the read handlers' timeout rather than submit's 20s.
-  timeout = 10
+  # Paginates a player's games and fans out up to 400 messages in batches of
+  # ten. Still no outbound HTTP, but more work than a read handler - sized
+  # like submit, which does the same shape of fan-out over archives.
+  timeout = 20
 
   environment {
     variables = {
       TABLE_NAME     = local.table_name
       EVAL_QUEUE_URL = local.eval_queue_url
+      # Must match the evaluator's, or selection would queue games the worker
+      # considers done, or skip games it would redo.
+      EVAL_DEPTH = tostring(var.eval_depth)
     }
   }
 

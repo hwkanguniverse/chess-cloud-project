@@ -7,14 +7,26 @@ are already stored and runs a local binary, so it makes **zero upstream
 requests** and that constraint simply does not apply to it. It scales to
 whatever is paid for.
 
-One message is one player. The worker selects the last GAMES_PER_CLASS games in
-each time control, skips any that already carry evals, and evaluates the rest.
+**One message is one game**, not one player, and that is what makes more
+workers useful. Per player, a single message pinned an entire job to a single
+task no matter how many were running - theohwk's 227 games took ~170 minutes
+with a second evaluator sitting idle beside it. Per game, ten workers finish
+the same job in ~17.
+
+It also shortens every failure. The visibility timeout drops from seven hours
+to five minutes, a crash loses one game rather than a whole player, and a
+retry costs 45 seconds of Fargate instead of hours - which is what makes
+quarantining a poison game cheap enough to be worth doing.
+
+Selection lives in the analyse Lambda, which resolves a player into games and
+fans out, exactly as submit resolves a player into archives. The worker no
+longer decides what to evaluate; it evaluates what it is handed.
 
 Why bounded rather than everything: at depth 18 a game is ~56 seconds of one
-vCPU. A player with 129,391 games would be months of compute; the same player
-capped at 100 per control is 318 games and about five minutes on ten workers.
-Bounding the *games* is what makes full depth affordable - bounding the depth
-instead was measured and does not work, see CLAUDE.md.
+vCPU. A player with 129,391 games would be months of compute; capped at 100
+per control it is 318 games. Bounding the *games* is what makes full depth
+affordable - bounding the depth instead was measured and does not work, see
+CLAUDE.md.
 """
 
 import io
@@ -41,10 +53,6 @@ ENGINE_PATH = os.environ.get("STOCKFISH_PATH", "/usr/games/stockfish")
 # not a saving.
 DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
 
-# Per time control, newest first. Overall would be wrong: a player's last 100
-# games can be entirely one control, hiding the rest of their play.
-GAMES_PER_CLASS = int(os.environ.get("EVAL_GAMES_PER_CLASS", "100"))
-
 # Centipawn thresholds. The exact numbers matter less than applying them
 # consistently - what a dashboard needs is which moves were bad, not agreement
 # with anyone else's labelling.
@@ -69,8 +77,13 @@ _stop = False
 
 
 def _on_sigterm(signum, frame):
-    """Fargate sends SIGTERM before stopping a task. Finish the game in hand
-    rather than dying mid-evaluation and replaying the whole message."""
+    """Fargate sends SIGTERM before stopping a task.
+
+    Finish the game in hand rather than dying mid-evaluation. With one game per
+    message that is at most ~45 seconds of work to protect, and the message is
+    only deleted once the write succeeds - so a task killed mid-game simply
+    replays it.
+    """
     global _stop
     print("SIGTERM received, finishing current game", flush=True)
     _stop = True
@@ -166,126 +179,110 @@ def evaluate_game(engine, pgn_text, colour):
     }
 
 
-def select_games(pk):
-    """The last GAMES_PER_CLASS games per time control that still need evals.
-
-    Reads newest-first and stops adding to a control once it is full, so a
-    player with 65,000 blitz games is read but only 100 are kept. Games that
-    already carry evals count towards the cap without being re-evaluated -
-    that is what makes a re-submit nearly free, and it must be per *game*
-    rather than per player: a player analysed last month has 100 evaluated
-    games, but their newest 100 now includes newer ones.
-    """
-    per_class = {}
-    todo = []
-    skipped = 0
-
-    kwargs = {
-        "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
-        "ScanIndexForward": False,  # newest archives first
-        "ProjectionExpression": "SK, #c, pgn, colour, evalDepth",
-        "ExpressionAttributeNames": {"#c": "class"},
-    }
-    while True:
-        page = table.query(**kwargs)
-        for item in page.get("Items", []):
-            klass = item.get("class") or "unknown"
-            seen = per_class.get(klass, 0)
-            if seen >= GAMES_PER_CLASS:
-                continue
-            per_class[klass] = seen + 1
-            if item.get("evalDepth") == DEPTH:
-                skipped += 1
-                continue
-            if not item.get("pgn"):
-                continue
-            todo.append(item)
-        if "LastEvaluatedKey" not in page:
-            break
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
-
-    return todo, skipped, per_class
-
-
 def process(message):
+    """Evaluate one game and write the result onto its item."""
     body = json.loads(message["Body"])
-    platform = body["platform"]
-    username = body["username"]
-    pk = f"PLAYER#{platform}#{username}"
+    pk = body["pk"]
+    sk = body["sk"]
 
-    todo, skipped, per_class = select_games(pk)
-    print(
-        f"evaluating {platform}/{username}: {len(todo)} games "
-        f"({skipped} already done) {dict(per_class)}",
-        flush=True,
-    )
-    if not todo:
+    item = table.get_item(
+        Key={"PK": pk, "SK": sk},
+        ProjectionExpression="pgn, colour, evalDepth",
+    ).get("Item")
+
+    if not item:
+        # The game was deleted between fan-out and here - a re-fetch can drop
+        # games that Chess.com no longer serves. Nothing to do, and nothing
+        # wrong: acknowledge it rather than retrying into the DLQ.
+        print(f"gone, skipping {sk}", flush=True)
         return
 
-    # One engine process for the whole message. Starting Stockfish per game
-    # would throw away the warm process that is the stated reason this runs on
-    # Fargate rather than Lambda.
-    engine = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
-    engine.configure({"Threads": 1, "Hash": 128})
-    done = 0
-    try:
-        for item in todo:
-            if _stop:
-                print("stopping early, message will replay", flush=True)
-                break
-            result = evaluate_game(engine, item["pgn"], item.get("colour", "w"))
-            if result is None:
-                # An unparseable game is marked rather than retried forever:
-                # it will never parse, so leaving it unmarked would mean
-                # re-attempting it on every future submit.
-                table.update_item(
-                    Key={"PK": pk, "SK": item["SK"]},
-                    UpdateExpression="SET evalError = :e, evalDepth = :d",
-                    ExpressionAttributeValues={":e": "unparseable pgn", ":d": DEPTH},
-                )
-                continue
+    if item.get("evalDepth") == DEPTH:
+        # Already done at this depth. The Lambda filters these out when it
+        # fans out, so reaching here means a duplicate delivery - which SQS
+        # allows and which costs nothing to absorb.
+        print(f"already evaluated {sk}", flush=True)
+        return
 
-            # One write per game. A game is the unit of work here, so a crash
-            # loses at most the game in hand and the rest stay evaluated.
-            table.update_item(
-                Key={"PK": pk, "SK": item["SK"]},
-                UpdateExpression=(
-                    "SET evals = :e, acpl = :a, blunders = :b, mistakes = :m, "
-                    "inaccuracies = :i, worstPly = :wp, worstLoss = :wl, "
-                    "evalDepth = :d, evaluatedAt = :t REMOVE evalError"
-                ),
-                ExpressionAttributeValues={
-                    ":e": result["evals"],
-                    ":a": result["acpl"],
-                    ":b": result["blunders"],
-                    ":m": result["mistakes"],
-                    ":i": result["inaccuracies"],
-                    ":wp": result["worstPly"],
-                    ":wl": result["worstLoss"],
-                    ":d": DEPTH,
-                    ":t": int(time.time()),
-                },
-            )
-            done += 1
-            if done % 25 == 0:
-                print(f"  {done}/{len(todo)}", flush=True)
-    finally:
-        engine.quit()
+    if not item.get("pgn"):
+        print(f"no pgn for {sk}", flush=True)
+        return
 
-    print(f"done {platform}/{username}: {done} games evaluated", flush=True)
+    # One engine process per message would start Stockfish per game and throw
+    # away the warm process that is the stated reason this runs on Fargate
+    # rather than Lambda. The module-level engine is started once per task and
+    # reused across every message that task handles.
+    engine = _engine()
+    result = evaluate_game(engine, item["pgn"], item.get("colour", "w"))
+
+    if result is None:
+        # An unparseable game is marked rather than retried forever: it will
+        # never parse, so leaving it unmarked means re-attempting it on every
+        # future analyse.
+        table.update_item(
+            Key={"PK": pk, "SK": sk},
+            UpdateExpression="SET evalError = :e, evalDepth = :d",
+            ExpressionAttributeValues={":e": "unparseable pgn", ":d": DEPTH},
+        )
+        print(f"unparseable {sk}", flush=True)
+        return
+
+    table.update_item(
+        Key={"PK": pk, "SK": sk},
+        UpdateExpression=(
+            "SET evals = :e, acpl = :a, blunders = :b, mistakes = :m, "
+            "inaccuracies = :i, worstPly = :wp, worstLoss = :wl, "
+            "evalDepth = :d, evaluatedAt = :t REMOVE evalError"
+        ),
+        ExpressionAttributeValues={
+            ":e": result["evals"],
+            ":a": result["acpl"],
+            ":b": result["blunders"],
+            ":m": result["mistakes"],
+            ":i": result["inaccuracies"],
+            ":wp": result["worstPly"],
+            ":wl": result["worstLoss"],
+            ":d": DEPTH,
+            ":t": int(time.time()),
+        },
+    )
+    print(f"done {sk}: acpl={result['acpl']} blunders={result['blunders']}", flush=True)
+
+
+_engine_process = None
+
+
+def _engine():
+    """The task's Stockfish process, started on first use and kept warm.
+
+    Reused across messages rather than per game. Starting the engine costs
+    roughly a second and loading NNUE weights costs more, which would be a
+    meaningful share of a 45-second job.
+    """
+    global _engine_process
+    if _engine_process is None:
+        _engine_process = chess.engine.SimpleEngine.popen_uci(ENGINE_PATH)
+        _engine_process.configure({"Threads": 1, "Hash": 128})
+    return _engine_process
 
 
 def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
-    print(f"evaluator up, depth {DEPTH}, polling", flush=True)
+    print(f"evaluator up, depth {DEPTH}, one game per message, polling", flush=True)
 
     while not _stop:
+        # Ten at a time. Games are seconds of work each, so fetching one per
+        # round trip would spend a real fraction of the time on SQS polling.
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL,
-            MaxNumberOfMessages=1,
+            MaxNumberOfMessages=10,
             WaitTimeSeconds=20,
         )
         for message in response.get("Messages", []):
+            if _stop:
+                # The rest of the batch stays invisible until the visibility
+                # timeout returns it, then another task picks it up.
+                break
             try:
                 process(message)
             except Exception as exc:  # noqa: BLE001
@@ -294,11 +291,15 @@ def main():
                 # disappear.
                 print(f"failed, leaving for retry/DLQ: {exc}", flush=True)
                 continue
+            # Deleted only after the write succeeded, so a crash mid-game
+            # replays that one game rather than losing it.
             sqs.delete_message(
                 QueueUrl=QUEUE_URL,
                 ReceiptHandle=message["ReceiptHandle"],
             )
 
+    if _engine_process is not None:
+        _engine_process.quit()
     print("exiting cleanly", flush=True)
     return 0
 

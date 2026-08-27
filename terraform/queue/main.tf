@@ -133,25 +133,24 @@ resource "aws_sqs_queue" "evaluation_dlq" {
 resource "aws_sqs_queue" "evaluation" {
   name = "${var.queue_name}-eval"
 
-  # One message is one player: up to 400 games (100 per time control) at ~56s
-  # each at depth 18, so 6.2 hours worst case against the 12h SQS maximum.
+  # One message is one GAME: ~56s at depth 18, so five minutes is ample.
   #
-  # The consequence worth knowing: a player is analysed by ONE worker, so
-  # adding workers speeds up *concurrent players*, not a single large one.
-  # Splitting a player across workers would mean one message per game and a
-  # way to know when the set is done - real work, not yet justified while the
-  # cap keeps the worst case to hours rather than days.
-  visibility_timeout_seconds = 25200 # 7h, worst case plus headroom
+  # This was 7h when a message was a whole player, and that number was the
+  # symptom rather than the design - it meant a crash lost hours of progress,
+  # a retry cost hours of Fargate, and a task killed mid-job left a message
+  # invisible until the following morning. Per game, all three shrink to
+  # roughly a minute.
+  visibility_timeout_seconds = 300
 
   receive_wait_time_seconds = 20
   message_retention_seconds = 345600
 
   redrive_policy = jsonencode({
     deadLetterTargetArn = aws_sqs_queue.evaluation_dlq.arn
-    # Two, not three. Each retry here is up to six hours of Fargate time
-    # rather than a few seconds of HTTP, so a poison message is far more
-    # expensive to keep retrying than it is to quarantine.
-    maxReceiveCount = 2
+    # Three, matching ingestion. Per game a retry costs ~45 seconds rather
+    # than the hours it cost per player, so riding out a Spot reclaim is
+    # cheap enough to be worth doing.
+    maxReceiveCount = 3
   })
 }
 
