@@ -150,28 +150,28 @@ Three things bound it together:
 
 ### Bounding the work
 
-- [ ] **Select the last 100 games per time control** for a player, newest first, and evaluate only those.
-- [ ] **Skip games that already have evals.** This is what makes re-submission free, and it must be **per game, not per player**: a player analysed last month has 100 evaluated games, but their newest 100 now includes games played since. Per-player skipping would never pick up new games; per-game re-evaluates only the delta, typically a handful. The same insight as the ETag, one layer down.
-- [ ] **Rate limit on submit** — a registered account plus N submissions per hour. This replaces verification entirely and is already owed to [PHASE-F.md](PHASE-F.md), so it is one control serving two purposes.
-- [ ] **Any user may analyse any player.** Analysis stays public shared data, so a popular player is evaluated once for everyone.
+- [x] **Select the last 100 games per time control** for a player, newest first, and evaluate only those. Selection lives in the analyse Lambda rather than the worker — it is a question about the table, and answering it once at the front door beats every worker re-deriving it. Proven on theohwk: 227 games selected as 100 blitz, 100 rapid, 26 daily, 1 bullet.
+- [x] **Skip games that already have evals.** This is what makes re-submission free, and it must be **per game, not per player**: a player analysed last month has 100 evaluated games, but their newest 100 now includes games played since. Per-player skipping would never pick up new games; per-game re-evaluates only the delta, typically a handful. The same insight as the ETag, one layer down. Filtered on `evalDepth == DEPTH` at selection, and again in the worker so a duplicate SQS delivery costs a `GetItem` rather than 45 seconds of engine.
+- [ ] **Rate limit on submit** *(not built)* — a registered account plus N submissions per hour. This replaces verification entirely and is already owed to [PHASE-F.md](PHASE-F.md), so it is one control serving two purposes.
+- [x] **Any user may analyse any player.** Analysis stays public shared data, so a popular player is evaluated once for everyone. `POST /analyse` is authenticated but takes any username; the caller's `sub` rides along as `requestedBy` for attribution only, never as a key.
 
 ### The engine
 
-- [ ] **Stockfish in the image.** The Dockerfile already anticipates this and says the image "stays this shape" — an apt or copy layer. Confirm the GPL terms are compatible with how this is deployed.
-- [ ] **One engine process, reused.** The skill's stated reason for Fargate over Lambda is "warm engine process between games". Starting Stockfish per game throws that away.
+- [x] **Stockfish in the image.** One `apt-get install stockfish` layer, plus `chess` for PGN parsing and UCI. **One image serves both workers** — the task definition picks which by overriding the command — because they share the table, the row shape and most of their operational story. GPL-3 is satisfied: the binary is unmodified Debian, distributed to nobody, and reached only over HTTP.
+- [x] **One engine process, reused.** A module-level `_engine()` started on first use and kept for the task's life, not per message — starting Stockfish and loading NNUE weights is a real share of a 45-second job. This is the skill's stated reason for Fargate over Lambda, so throwing it away would have removed the justification for the platform.
 - [x] **Depth settled at 18** — measured, not assumed. See the settled section above for the recall numbers that ruled out 8 and 12. 55.6 sec/game at 1 vCPU.
-- [ ] **Separate route** for per-game analysis, against an already-ingested game.
-- [ ] **Ingestion stores the PGN** on the game item.
+- [x] **Separate route** — `POST /analyse`, against an already-ingested player. 404 if nothing is stored, so a request for impossible work fails at the front door rather than as messages that reach the DLQ looking like a real fault. Returns 202 with `queued`, `skipped` and `byClass`, because a saving that is not reported is only claimed.
+- [x] **Ingestion stores the PGN** on the game item, via `summarise_game()`. Measured at 3,151 B mean against a 400 KB limit.
 
 ### Infrastructure
 
-- [ ] **Separate queue and service** for evaluation, so ingestion stays pinned at 1 and evaluation scales independently.
-- [ ] **Task sizing.** Ingestion is I/O-bound on 0.25 vCPU / 0.5 GB; Stockfish is CPU-bound and wants more. Roughly **cost-neutral** — 4× faster at 4× the rate — so this is a latency decision, not a spend one.
-- [ ] **Re-measure the per-month cost** with the engine in the loop. Phase 3's $0.000186/month and $0.028/player are ingestion-only and will not survive.
+- [x] **Separate queue and service** for evaluation, so ingestion stays pinned at 1 and evaluation scales independently. `check-drift.sh` now asserts `MaxCapacity` **scoped to the ingestion worker only** — the evaluator is deliberately exempt, because it is the one service whose ceiling is a tuning knob rather than a guard.
+- [x] **Task sizing.** Ingestion stays 0.25 vCPU / 0.5 GB; the evaluator runs **1 vCPU / 2 GB** with `Threads: 1` and a 128 MB hash. One thread per task rather than four per task, because SQS already parallelises across tasks and Stockfish scales better across processes than threads at fixed depth.
+- [ ] **Re-measure the per-month cost** with the engine in the loop. Phase 3's $0.000186/month and $0.028/player are ingestion-only and will not survive. *(The theohwk run gives the raw numbers — 227 games, 8 tasks — but they have not been worked into a per-player figure yet.)*
 
 ### The existing data
 
-- [ ] **~390 months are `COMPLETE` but have no PGNs and no evals**, and their stored ETags mean a re-submit returns `304` and skips everything. **Solve this first when building** — it determines whether existing data is usable or must be re-fetched.
+- [ ] **~390 months are `COMPLETE` but have no PGNs and no evals**, and their stored ETags mean a re-submit returns `304` and skips everything. **Deliberately deferred** — theohwk was wiped and re-fetched instead, which proved the whole path end to end without touching erik (230 months) or danielnaroditsky (149). The choice is unchanged: clear those ETags and re-fetch, or leave them counted-only. Still owed.
 - [ ] **`COMPLETE` changes meaning again.** It meant *plumbing ran*, then *counted*. It must now distinguish counted from evaluated, and the item has to say which.
 
 ---
@@ -180,28 +180,28 @@ Three things bound it together:
 
 Stated because the temptation to revisit them will be strongest here.
 
-- [ ] **Ingestion still takes one message at a time.** `max_capacity = 1` is the upstream guard and is drift-checked. Evaluation scaling is *not* a licence to scale ingestion — the Chess.com constraint is unchanged.
-- [ ] **Idempotency must survive.** The aggregate is recomputed rather than accumulated; the games-then-status ordering replaces the single-write guarantee. Evaluation must break neither.
-- [ ] **The ETag path must still short-circuit.** A `304` skips the parse, the aggregate and the write. Added naively, evaluation could re-run on an unchanged month and turn the 155× saving into nothing.
+- [x] **Ingestion still takes one message at a time.** `max_capacity = 1` is the upstream guard and is drift-checked. Evaluation scaling is *not* a licence to scale ingestion — the Chess.com constraint is unchanged. The drift check was deliberately **scoped to the worker service** when the evaluator arrived, so a shared assertion could not be loosened for one and silently lost for the other.
+- [x] **Idempotency must survive.** The aggregate is recomputed rather than accumulated; the games-then-status ordering replaces the single-write guarantee. Evaluation writes named attributes onto an existing game item with `UpdateItem` and accumulates nothing, so re-running a game overwrites rather than doubles.
+- [ ] **The ETag path must still short-circuit.** A `304` skips the parse, the aggregate and the write. Added naively, evaluation could re-run on an unchanged month and turn the 155× saving into nothing. *Structurally safe — evaluation is a separate route that never touches the ingestion path — but not yet watched live.*
 
 ## Failure paths to drill
 
 Same standard as every prior phase: watched live, not asserted.
 
-- [ ] **A game the engine cannot parse** → does not fail the whole month.
+- [x] **A game the engine cannot parse** → does not fail the whole month. **Drilled itself**: one of theohwk's 227 games was unparseable. It was marked `evalError` with `evalDepth` set — marked rather than merely skipped, so it is not re-attempted on every future analyse — and the other 226 completed. The batch was unaffected.
 - [ ] **Engine crash or hang mid-game** → the message returns to the queue, nothing half-written.
-- [ ] **A job that times out** — evaluation is far slower than ingestion, so a visibility timeout ample for a fetch may not be.
+- [x] **A job that times out** — solved by shrinking the job rather than growing the timeout. One message per game took the visibility timeout from **7 hours to 5 minutes** against ~45 seconds of work. A per-player message would have needed a timeout longer than most drills.
 - [ ] **Re-submitting an evaluated month** → the ETag still short-circuits and nothing is re-evaluated.
 - [ ] **Crash mid-evaluation** → recovery does not double-count.
-- [ ] **An unverified user submitting two analyses** → the second is refused, not queued.
-- [ ] **A month that exceeds the item limit** → fixed by per-game items, but confirm the new shape has no equivalent cliff.
+- [x] ~~**An unverified user submitting two analyses**~~ → **moot.** Verification was cut, so there is no unverified state to drill. The replacement control is the rate limit, still owed above.
+- [x] **A month that exceeds the item limit** → **no equivalent cliff.** The worst real game is 8,872 B of PGN plus ~500 plies of evals — comfortably inside 400 KB, and a game cannot grow without bound the way a month could. The month item now holds counts only, so the thing that was at 95% is at 0.5 RCUs.
 
 ## Cost controls
 
-- [ ] **Scale-to-zero is load-bearing twice over now.** Ten idle evaluation tasks at 1 vCPU / 2 GB are **$3.61/day — $108/month** against a ~$2 budget. `check-drift.sh` asserts `MinCapacity == 0` per service, so a new service is covered automatically; **confirm it fires rather than assuming**.
-- [ ] **Verify the parallel speed-up rather than assuming it.** The arithmetic assumes ten tasks each get a full vCPU; Spot contention is unmeasured.
-- [ ] Workers back to zero after every drill.
-- [ ] Re-run `scripts/check-drift.sh` after each apply.
+- [x] **Scale-to-zero is load-bearing twice over now.** Ten idle evaluation tasks at 1 vCPU / 2 GB are **$3.61/day — $108/month** against a ~$2 budget. `check-drift.sh` asserts `MinCapacity == 0` per service and covers the new one automatically. **It very nearly was not enough** — see the Spot quota deadlock below.
+- [ ] **Verify the parallel speed-up rather than assuming it.** *Still unmeasured* — the theohwk run completed on 8 tasks but per-task throughput under Spot contention was never timed, which is the actual question. What the run **did** find is the constraint above it: **the account's Fargate Spot quota is 8 vCPUs, not 10**. Asking for 10 does not give you 8 — ECS retries the two unplaceable tasks forever, the scaling activity stays `InProgress`, and Auto Scaling will not begin a scale-*in* while one is unresolved. The service deadlocked at 8 tasks with an empty queue and the scale-in alarm correctly in ALARM but unable to act. `eval_max_tasks` is now **8**, matching the quota: above it the ceiling is not a ceiling, it is a deadlock.
+- [x] Workers back to zero after every drill. Verified after the theohwk run: both services desired 0 / running 0, zero tasks in the cluster.
+- [x] Re-run `scripts/check-drift.sh` after each apply. Clean after the quota fix.
 
 ---
 
@@ -220,11 +220,13 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
 | Where evaluations live | **One item per game** — `SK = GAME#<yyyy-mm>#<id>`, evals on the item, projected away for list reads | Evals in S3 with a DynamoDB pointer; a compressed blob on the month item; storing only classified moves; raising the limit | Per-ply evals cannot share the month item under any encoding — 975 KB against a 400 KB limit, measured. Per-game items are 906 B, 0.2% of the limit, and the shape matches what the data is: a game is the unit being evaluated. It also fixed a live problem the engine did not create. S3 was the close second and genuinely cheap, but splits one write across two stores and leaves the 95% item untouched. Raising the limit is impossible at any price — 400 KB is a fixed service characteristic, not an adjustable quota. |
-| Fetch vs analyse | Two operations, separate limits — bulk analysis needs a verified account, one game at a time otherwise | One submit that both fetches and evaluates; a per-user monthly quota; verified-users-only | Evaluation is ~1,000× the cost of ingestion per game, so they cannot share a limit. Splitting keeps the free half genuinely useful — the counted statistics need no engine — so a new visitor sees a real dashboard rather than a locked door. A quota bounds spend but not concurrency; verified-only bounds both and kills casual use. |
+| Fetch vs analyse | Two operations, separate limits — `POST /games` ingests, `POST /analyse` evaluates | One submit that both fetches and evaluates; a per-user monthly quota; verified-users-only | Evaluation is ~1,000× the cost of ingestion per game, so they cannot share a limit. Splitting keeps the free half genuinely useful — the counted statistics need no engine — so a new visitor sees a real dashboard rather than a locked door. A quota bounds spend but not concurrency; verified-only bounds both and kills casual use. *(The verification half of this row was later cut outright — see the verification row below. The split itself stands.)* |
 | PGN storage | Store the PGN on the game item at ingestion | Re-fetch the game from Chess.com when it is analysed | Re-fetching puts evaluation back behind the serialised worker pin, which is the whole thing the split exists to escape. Storing costs 0.8% of an item and $0.12/month for everything ingested today — and it is the reason evaluation can scale at all. |
 | Evaluation concurrency | Its own queue and service, scaled past one task | Reuse the ingestion worker and its pin | The pin protects Chess.com, and evaluation makes zero upstream requests. Concurrency buys latency at no extra cost, because Fargate bills per vCPU-second. |
 | Analysis depth | **18**, matching Chess.com's Platinum tier | Depth 8; depth 12; a two-pass depth-8-screen-then-deep design | Measured over 1,047 plies against depth 18: depth 8 recalls **53%** of blunders and reports **half** the true average centipawn loss; depth 12 reaches 65%. A cheap statistic nobody can trust is not a saving. Depth 8 also *invents* mistakes — 46% of its flags are not mistakes at 18 — and telling a user they blundered when they did not is worse than silence. |
 | What gets evaluated | **The last 100 games per time control** | Every game; last 100 overall; recent months only | Bounding the games rather than the depth is what makes depth 18 affordable — worst case 400 games, **$0.093** per player, against $0.70 for every game. Per control rather than overall because a player's last 100 games can be entirely one control: theohwk's would be nearly all rapid, hiding 437 blitz games. It also makes the outlier problem disappear — danielnaroditsky's 129,391 games become 318, the same as everyone. |
+| Message granularity | **One message per game** | One message per player, the worker selecting games itself | A per-player message pins the whole job to a single task however many are running — measured at ~170 minutes for theohwk's 227 games with a second evaluator sitting idle beside it. Per game, the same job is ~17 minutes on ten workers. It also shortens every failure: the visibility timeout drops from 7 hours to 5 minutes, a crash loses one game rather than a player, and a retry costs 45 seconds instead of hours. Selection moves to the analyse Lambda, which is the right place anyway — it is a question about the table, answered once rather than by every worker. |
+| Evaluator ceiling | **8 tasks**, matching the Fargate Spot vCPU quota | 10, the number the cost arithmetic used; raising the quota | Above the quota the ceiling is not a ceiling, it is a **deadlock**: ECS retries unplaceable tasks forever, the scaling activity stays `InProgress`, and Auto Scaling refuses to scale *in* while one is unresolved — so 8 tasks ran indefinitely against an empty queue with the scale-in alarm correctly in ALARM. Raising the quota is possible but adds a request-and-wait to a project whose whole cost story is scale-to-zero, and 8 is within a task or two of 10 anyway. |
 | Account verification | **Cut** — a registered account and a rate limit | Profile-token verification gating bulk analysis; Chess.com OAuth; Lichess link as proof | Verification existed to stop one user running up unbounded cost. With a hard per-player cap and per-game dedup there is no unbounded cost: re-submitting an analysed player is **$0.00**, and analysis is keyed by player rather than user, so a popular player is paid for once by whoever asks first. The residual risk is scripted distinct usernames, which a rate limit handles — and one was already owed to Phase F, so it is one control serving two purposes rather than a new feature. |
 
 ---
@@ -233,7 +235,9 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 
 - **The engine does not license more ingestion concurrency.** Evaluation scaling is safe *because it makes no upstream requests*. Ingestion's constraint is unchanged and is still the one risk money cannot undo.
 - **Depth was the wrong lever, and measuring is what showed it.** Depth 8 was chosen on cost and plausible reasoning, and benchmarking found 53% blunder recall and a headline centipawn figure off by half. The fix was bounding the *games* rather than the depth. Reasoning about engine behaviour without measuring it produced a confidently wrong answer here.
-- **Idle evaluation workers are the new worst cost mistake.** $108/month against a ~$2 budget — 30× worse than the ingestion worker ever was.
+- **Idle evaluation workers are the new worst cost mistake.** $108/month against a ~$2 budget — 30× worse than the ingestion worker ever was. And the way it nearly happened was *raising* a ceiling, not lowering one.
+- **A ceiling above a service quota is a deadlock, not a ceiling.** `max_capacity` past the Fargate Spot vCPU quota leaves tasks permanently unplaceable, the scaling activity permanently `InProgress`, and scale-in permanently blocked. Every component reported success throughout — the run finished, the queue emptied, the alarm fired correctly — and the tasks stayed up. **Check the quota before raising any ceiling.**
+- **Four bugs this phase hid behind healthy status.** The mate-score contamination, the scale-in alarm watching only `Visible`, the execution role scoped to one log group, and the quota deadlock. Each one had everything reporting green. "No errors" is not evidence.
 - **Storage recurs where compute does not.** PGNs bill monthly whether or not anyone analyses them.
 - **"COMPLETE" changes meaning again**, for the third time. The item has to say which meaning applies.
 - **The dashboard is the product, not the single-game view.** The skill says Lichess does the single-game report better, and it is the tempting place to over-invest.
