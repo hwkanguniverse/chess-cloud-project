@@ -167,7 +167,16 @@ Three things bound it together:
 
 - [x] **Separate queue and service** for evaluation, so ingestion stays pinned at 1 and evaluation scales independently. `check-drift.sh` now asserts `MaxCapacity` **scoped to the ingestion worker only** — the evaluator is deliberately exempt, because it is the one service whose ceiling is a tuning knob rather than a guard.
 - [x] **Task sizing.** Ingestion stays 0.25 vCPU / 0.5 GB; the evaluator runs **1 vCPU / 2 GB** with `Threads: 1` and a 128 MB hash. One thread per task rather than four per task, because SQS already parallelises across tasks and Stockfish scales better across processes than threads at fixed depth.
-- [ ] **Re-measure the per-month cost** with the engine in the loop. Phase 3's $0.000186/month and $0.028/player are ingestion-only and will not survive. *(The theohwk run gives the raw numbers — 227 games, 8 tasks — but they have not been worked into a per-player figure yet.)*
+- [x] **Re-measure the per-month cost** with the engine in the loop. Phase 3's $0.000186/month and $0.028/player were ingestion-only and did not survive — but **evaluation came in cheaper than planned, not dearer**, because games take 31.4 s rather than the assumed 55.6 s. At Spot rates for 1 vCPU / 2 GB that is **$0.000143/game**, 62% of the $0.00023 this file budgeted:
+
+| | Games | Cost | 1 task | 8 tasks |
+|---|---|---|---|---|
+| theohwk | 227 | $0.033 | 2.0 hr | **18 min** |
+| danielnaroditsky | 318 | $0.046 | 2.8 hr | 25 min |
+| erik | 361 | $0.052 | 3.2 hr | 28 min |
+| **Worst case** (4 × 100) | 400 | **$0.057** | 3.5 hr | 31 min |
+
+Every latency and cost figure elsewhere in this file is therefore **conservative by ~44%**, and the 10,000-player abuse ceiling drops from $930 to **~$572**.
 
 ### The existing data
 
@@ -182,24 +191,24 @@ Stated because the temptation to revisit them will be strongest here.
 
 - [x] **Ingestion still takes one message at a time.** `max_capacity = 1` is the upstream guard and is drift-checked. Evaluation scaling is *not* a licence to scale ingestion — the Chess.com constraint is unchanged. The drift check was deliberately **scoped to the worker service** when the evaluator arrived, so a shared assertion could not be loosened for one and silently lost for the other.
 - [x] **Idempotency must survive.** The aggregate is recomputed rather than accumulated; the games-then-status ordering replaces the single-write guarantee. Evaluation writes named attributes onto an existing game item with `UpdateItem` and accumulates nothing, so re-running a game overwrites rather than doubles.
-- [ ] **The ETag path must still short-circuit.** A `304` skips the parse, the aggregate and the write. Added naively, evaluation could re-run on an unchanged month and turn the 155× saving into nothing. *Structurally safe — evaluation is a separate route that never touches the ingestion path — but not yet watched live.*
+- [x] **The ETag path must still short-circuit.** A `304` skips the parse, the aggregate and the write. **Drilled 27 Aug 2026** on theohwk 2020-11, a month with 24 evaluated games: `fetching (conditional)` → `unchanged, skipping` in under a second, `lastCheckHit` flipped to `true` and `checkedAt` advanced while `analysedAt` stayed frozen, all 24 evals intact, and **the eval queue never received a message**. Evaluation is a separate route that never touches the ingestion path, so the 155× saving is untouched.
 
 ## Failure paths to drill
 
 Same standard as every prior phase: watched live, not asserted.
 
 - [x] **A game the engine cannot parse** → does not fail the whole month. **Drilled itself**: one of theohwk's 227 games was unparseable. It was marked `evalError` with `evalDepth` set — marked rather than merely skipped, so it is not re-attempted on every future analyse — and the other 226 completed. The batch was unaffected.
-- [ ] **Engine crash or hang mid-game** → the message returns to the queue, nothing half-written.
+- [x] **Engine crash or hang mid-game** → the message returns to the queue, nothing half-written. **Drilled 27 Aug 2026** by `stop-task` on a working evaluator with 24 games in flight. SIGTERM → `done` on the game in hand **4 seconds later** → `exiting cleanly`; the rest of that task's batch stayed invisible and was redelivered. ECS replaced the task (7→8), and **24/24 games finished with an empty DLQ**.
 - [x] **A job that times out** — solved by shrinking the job rather than growing the timeout. One message per game took the visibility timeout from **7 hours to 5 minutes** against ~45 seconds of work. A per-player message would have needed a timeout longer than most drills.
-- [ ] **Re-submitting an evaluated month** → the ETag still short-circuits and nothing is re-evaluated.
-- [ ] **Crash mid-evaluation** → recovery does not double-count.
+- [x] **Re-submitting an evaluated month** → the ETag still short-circuits and nothing is re-evaluated. Same drill as the ETag row above.
+- [x] **Crash mid-evaluation** → recovery does not double-count. **Drilled** by redriving the eval DLQ: all 10 messages logged `already evaluated` and were deleted without re-running the engine. `acpl` and `blunders` were unchanged and **`evaluatedAt` still held the original timestamps** — the guard short-circuits before any write, so redelivery costs one `GetItem`.
 - [x] ~~**An unverified user submitting two analyses**~~ → **moot.** Verification was cut, so there is no unverified state to drill. The replacement control is the rate limit, still owed above.
 - [x] **A month that exceeds the item limit** → **no equivalent cliff.** The worst real game is 8,872 B of PGN plus ~500 plies of evals — comfortably inside 400 KB, and a game cannot grow without bound the way a month could. The month item now holds counts only, so the thing that was at 95% is at 0.5 RCUs.
 
 ## Cost controls
 
 - [x] **Scale-to-zero is load-bearing twice over now.** Ten idle evaluation tasks at 1 vCPU / 2 GB are **$3.61/day — $108/month** against a ~$2 budget. `check-drift.sh` asserts `MinCapacity == 0` per service and covers the new one automatically. **It very nearly was not enough** — see the Spot quota deadlock below.
-- [ ] **Verify the parallel speed-up rather than assuming it.** *Still unmeasured* — the theohwk run completed on 8 tasks but per-task throughput under Spot contention was never timed, which is the actual question. What the run **did** find is the constraint above it: **the account's Fargate Spot quota is 8 vCPUs, not 10**. Asking for 10 does not give you 8 — ECS retries the two unplaceable tasks forever, the scaling activity stays `InProgress`, and Auto Scaling will not begin a scale-*in* while one is unresolved. The service deadlocked at 8 tasks with an empty queue and the scale-in alarm correctly in ALARM but unable to act. `eval_max_tasks` is now **8**, matching the quota: above it the ceiling is not a ceiling, it is a deadlock.
+- [x] **Verify the parallel speed-up rather than assuming it.** **Measured from the logs:** 190 games across 8 tasks in 14.8 min wall clock, median **31.4 s/game**, giving **6.72× speed-up at 84% parallel efficiency**. Spot contention is real but small — the 16% is SQS polling and batch tail, not throttling. Two corrections fall out: games are **31.4 s, not the 55.6 s** this file assumed, so every cost and latency figure here is **conservative by ~44%**; and the constraint above it is **the account's Fargate Spot quota of 8 vCPUs, not 10**. Asking for 10 does not give you 8 — ECS retries the two unplaceable tasks forever, the scaling activity stays `InProgress`, and Auto Scaling will not begin a scale-*in* while one is unresolved. The service deadlocked at 8 tasks with an empty queue and the scale-in alarm correctly in ALARM but unable to act. `eval_max_tasks` is now **8**, matching the quota: above it the ceiling is not a ceiling, it is a deadlock.
 - [x] Workers back to zero after every drill. Verified after the theohwk run: both services desired 0 / running 0, zero tasks in the cluster.
 - [x] Re-run `scripts/check-drift.sh` after each apply. Clean after the quota fix.
 
@@ -240,4 +249,6 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 - **Four bugs this phase hid behind healthy status.** The mate-score contamination, the scale-in alarm watching only `Visible`, the execution role scoped to one log group, and the quota deadlock. Each one had everything reporting green. "No errors" is not evidence.
 - **Storage recurs where compute does not.** PGNs bill monthly whether or not anyone analyses them.
 - **"COMPLETE" changes meaning again**, for the third time. The item has to say which meaning applies.
+- **A DLQ message is not proof of lost work.** Both games in the eval DLQ had been **successfully evaluated** — they exhausted `maxReceiveCount` during the AccessDenied window and then succeeded on a later delivery, leaving the failure record behind but not the failure. Read the *table* before concluding from the queue.
+- **`filter-log-events` silently returned nothing** where `get-log-events` returned 622 lines. Every drill here was verified by reading streams directly. A log query that comes back empty is not evidence of a quiet system.
 - **The dashboard is the product, not the single-game view.** The skill says Lichess does the single-game report better, and it is the tempting place to over-invest.
