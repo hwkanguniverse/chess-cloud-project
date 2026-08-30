@@ -155,6 +155,45 @@ variable "eval_depth" {
   default     = 18
 }
 
+variable "player_timeout" {
+  description = <<-EOT
+    Longer than the other read handlers because this one derives evaluation
+    state by paginating the player's game items, not just their months. erik is
+    230 months and the bulk of ~147k stored games; projecting to three
+    attributes keeps that cheap in RCUs but it is still several round trips.
+
+    Still well under the gateway's 29s cap, so a genuinely hung call fails here
+    rather than as a gateway timeout with no log line to explain it.
+  EOT
+  type        = number
+  default     = 25
+}
+
+variable "eval_classes" {
+  description = <<-EOT
+    Time controls worth evaluating. Daily is excluded: a correspondence player
+    moves with an engine and a database open, so centipawn loss there measures
+    their tools rather than their judgement, and averaging it into a headline
+    figure describes two different activities at once.
+
+    Set on both the analyse and player functions from this one variable. They
+    must agree - selection decides what to queue, the player route derives what
+    is outstanding, and if the rules differ the dashboard shows work pending
+    that nothing will ever pick up.
+  EOT
+  type        = list(string)
+  default     = ["bullet", "blitz", "rapid"]
+}
+
+variable "eval_games_per_class" {
+  description = <<-EOT
+    The per-time-control cap, mirrored onto the player route so its derived
+    counts use the same denominator selection does.
+  EOT
+  type        = number
+  default     = 100
+}
+
 locals {
   table_name = data.terraform_remote_state.data.outputs.table_name
   table_arn  = data.terraform_remote_state.data.outputs.table_arn
@@ -500,7 +539,9 @@ resource "aws_lambda_function" "analyse" {
       EVAL_QUEUE_URL = local.eval_queue_url
       # Must match the evaluator's, or selection would queue games the worker
       # considers done, or skip games it would redo.
-      EVAL_DEPTH = tostring(var.eval_depth)
+      EVAL_DEPTH           = tostring(var.eval_depth)
+      EVAL_CLASSES         = join(",", var.eval_classes)
+      EVAL_GAMES_PER_CLASS = tostring(var.eval_games_per_class)
     }
   }
 
@@ -572,11 +613,22 @@ resource "aws_lambda_function" "player" {
 
   runtime = "python3.13"
   handler = "player.handler"
-  timeout = var.lambda_timeout
+  # Not var.lambda_timeout: that is sized for one DynamoDB call, and this
+  # route now paginates a second Query across the player's whole game
+  # partition to derive evaluation state. A heavy account is tens of thousands
+  # of rows even projected down to three attributes.
+  timeout = var.player_timeout
 
   environment {
     variables = {
       TABLE_NAME = local.table_name
+      # This route derives evaluation state from the game items rather than
+      # reading it off the month, so it needs the same three settings
+      # selection uses. Disagreement here is silent: the counts would simply
+      # be wrong, with no error anywhere.
+      EVAL_DEPTH           = tostring(var.eval_depth)
+      EVAL_CLASSES         = join(",", var.eval_classes)
+      EVAL_GAMES_PER_CLASS = tostring(var.eval_games_per_class)
     }
   }
 

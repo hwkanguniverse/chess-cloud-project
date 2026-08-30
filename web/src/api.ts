@@ -101,10 +101,32 @@ export interface PlayerTotals extends Omit<MonthSummary, "ratingLast"> {
   winRate?: number;
 }
 
+/**
+ * The second statistics group, derived server-side from the game items rather
+ * than stored on any month.
+ *
+ * `status` on a Month says whether it was *ingested*; it has never said
+ * whether it was evaluated, and deliberately still does not. Read this
+ * instead.
+ *
+ * `inScope` is the denominator for progress - not the player's total game
+ * count, because evaluation is capped per time control and excludes daily.
+ * `excluded` games are not a backlog: they will never be evaluated.
+ */
+export interface EvaluationState {
+  evaluated: number;
+  outstanding: number;
+  inScope: number;
+  byClass: Record<string, number>;
+  excluded: Record<string, number>;
+  depth: number;
+}
+
 export interface PlayerResponse {
   player: string;
   totals: PlayerTotals;
   pending: number;
+  evaluation: EvaluationState;
   months: Month[];
 }
 

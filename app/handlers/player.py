@@ -31,6 +31,31 @@ table = boto3.resource("dynamodb").Table(TABLE_NAME)
 PLATFORM_RE = re.compile(r"^(chesscom|lichess)$")
 USERNAME_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 
+# Evaluation state is *derived* from the game items, never stored on the month.
+#
+# "COMPLETE" has meant three different things across three phases - plumbing
+# ran, then games counted, then games evaluated - and the month item could not
+# say which. The fix is not another status value or a counter: `status` is the
+# ingestion lifecycle and overloading it would drop months out of cumulative()
+# (which filters on == "COMPLETE"), while a counter would have to be
+# incremented by up to eight evaluators at once, breaking the recompute-never-
+# accumulate rule that makes redelivery free.
+#
+# So it is computed here, from the same projected Query that analyse.py
+# already runs to decide what to queue. It cannot drift from the game items
+# because it *is* the game items.
+DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
+
+# Must match analyse.py's. If these disagree, this route reports games as
+# outstanding that selection will never queue, and the dashboard shows a
+# player as permanently part-evaluated.
+EVAL_CLASSES = set(
+    c.strip()
+    for c in os.environ.get("EVAL_CLASSES", "bullet,blitz,rapid").split(",")
+    if c.strip()
+)
+GAMES_PER_CLASS = int(os.environ.get("EVAL_GAMES_PER_CLASS", "100"))
+
 # Per-month fields returned in a player-level list. The games array is
 # deliberately excluded: 828 games is 145KB, and ~200 of those months in one
 # response would be hundreds of megabytes. Drill into a month for the games.
@@ -51,6 +76,68 @@ def _response(status, body):
         "statusCode": status,
         "headers": {"Content-Type": "application/json"},
         "body": json.dumps(body, default=_json_default),
+    }
+
+
+def evaluation_state(pk):
+    """What has been evaluated for this player, derived from the game items.
+
+    Mirrors analyse.py's selection deliberately: newest-first, the same
+    per-class cap, the same excluded controls. The point is that `outstanding`
+    here equals what a POST /analyse would queue right now - if the two rules
+    drifted, this route would show work pending that nothing will ever pick up.
+
+    Reads only SK, class and evalDepth. The PGN is ~3KB per game and the evals
+    array is larger still; projecting both away is what keeps this proportional
+    to games rather than to bytes of chess.
+
+    Returns evaluated/outstanding/excluded counts plus per-class detail, and
+    `inScope` - the denominator a progress bar needs, since it is capped and so
+    is not the player's total game count.
+    """
+    per_class = {}
+    evaluated = 0
+    outstanding = 0
+    excluded = {}
+
+    kwargs = {
+        "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
+        "ScanIndexForward": False,
+        "ProjectionExpression": "SK, #c, evalDepth",
+        "ExpressionAttributeNames": {"#c": "class"},
+    }
+    while True:
+        page = table.query(**kwargs)
+        for item in page.get("Items", []):
+            klass = item.get("class") or "unknown"
+
+            if klass not in EVAL_CLASSES:
+                excluded[klass] = excluded.get(klass, 0) + 1
+                continue
+
+            seen = per_class.get(klass, 0)
+            if seen >= GAMES_PER_CLASS:
+                continue
+            per_class[klass] = seen + 1
+
+            # evalDepth is set on success *and* on an unparseable game, which
+            # is what stops a broken PGN being re-queued forever. Both count
+            # as done here: neither will be attempted again.
+            if item.get("evalDepth") == DEPTH:
+                evaluated += 1
+            else:
+                outstanding += 1
+        if "LastEvaluatedKey" not in page:
+            break
+        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+
+    return {
+        "evaluated": evaluated,
+        "outstanding": outstanding,
+        "inScope": evaluated + outstanding,
+        "byClass": per_class,
+        "excluded": excluded,
+        "depth": DEPTH,
     }
 
 
@@ -163,6 +250,11 @@ def handler(event, context):
             "totals": cumulative(months),
             # What the client polls on: non-zero means more months are coming.
             "pending": pending,
+            # The second statistics group. Always present, so a player who has
+            # only been ingested reports a truthful zero rather than the
+            # client having to infer absence - which is the ambiguity this
+            # whole thing exists to remove.
+            "evaluation": evaluation_state(f"PLAYER#{platform}#{username}"),
             "months": months,
         },
     )

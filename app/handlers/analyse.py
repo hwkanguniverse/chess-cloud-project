@@ -48,6 +48,23 @@ USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,50}$")
 # case is four controls of 100.
 GAMES_PER_CLASS = int(os.environ.get("EVAL_GAMES_PER_CLASS", "100"))
 
+# Which time controls are worth evaluating at all. Daily is excluded: a
+# correspondence player moves with an engine and an opening database open, so
+# centipawn loss there measures their *tools*, not their judgement. Averaging
+# it in with real-time play makes the headline figure describe two different
+# activities at once.
+#
+# Duplicated in player.py, which must exclude by the same rule or its derived
+# counts would report daily-heavy months as permanently under-evaluated. Kept
+# as a constant in both rather than a shared module because each handler is
+# packaged as its own single-file zip - the same reason EVAL_DEPTH is
+# duplicated against the evaluator.
+EVAL_CLASSES = set(
+    c.strip()
+    for c in os.environ.get("EVAL_CLASSES", "bullet,blitz,rapid").split(",")
+    if c.strip()
+)
+
 # The depth the evaluator runs at. Duplicated here only to decide what still
 # needs work; the worker owns the actual setting.
 DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
@@ -80,10 +97,17 @@ def select_games(pk):
     evaluated games, but their newest 100 now includes games played since, so
     a per-player check would never pick those up. The same insight as the
     ETag, one layer down.
+
+    Time controls outside EVAL_CLASSES are excluded before the cap is applied,
+    so excluding daily does not consume a slot that a blitz game could have
+    used. They are returned as their own count rather than folded into
+    `skipped`, which means something different: skipped games *are* evaluated,
+    excluded games never will be.
     """
     per_class = {}
     todo = []
     skipped = 0
+    excluded = {}
     seen_any = False
 
     kwargs = {
@@ -100,6 +124,15 @@ def select_games(pk):
         for item in page.get("Items", []):
             seen_any = True
             klass = item.get("class") or "unknown"
+
+            # Out of scope by rule, not by cap. Counted separately so the
+            # response can say "26 daily games, deliberately not evaluated"
+            # rather than leaving them indistinguishable from games that
+            # simply have not been reached yet.
+            if klass not in EVAL_CLASSES:
+                excluded[klass] = excluded.get(klass, 0) + 1
+                continue
+
             seen = per_class.get(klass, 0)
             if seen >= GAMES_PER_CLASS:
                 continue
@@ -112,7 +145,7 @@ def select_games(pk):
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
-    return todo, skipped, per_class, seen_any
+    return todo, skipped, per_class, excluded, seen_any
 
 
 def fan_out(pk, sks, user_id):
@@ -160,7 +193,7 @@ def handler(event, context):
         return _response(400, {"error": "malformed username"})
 
     pk = f"PLAYER#{platform}#{username}"
-    todo, skipped, per_class, seen_any = select_games(pk)
+    todo, skipped, per_class, excluded, seen_any = select_games(pk)
 
     # The player must already be ingested. Evaluation reads stored PGNs, so
     # asking to analyse a player nobody has fetched is a request for work that
@@ -191,6 +224,11 @@ def handler(event, context):
             "queued": queued,
             "skipped": skipped,
             "byClass": per_class,
+            # Not a saving and not a backlog: games that will never be
+            # evaluated by design. Reported so a player whose history is
+            # mostly correspondence gets an explanation rather than a
+            # suspiciously small queued count.
+            "excluded": excluded,
             "statusUrl": f"/player/{platform}/{username}",
         },
     )
