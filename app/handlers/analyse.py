@@ -29,9 +29,11 @@ every worker re-derive it.
 import json
 import os
 import re
+import time
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 EVAL_QUEUE_URL = os.environ["EVAL_QUEUE_URL"]
@@ -68,6 +70,100 @@ EVAL_CLASSES = set(
 # The depth the evaluator runs at. Duplicated here only to decide what still
 # needs work; the worker owns the actual setting.
 DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
+
+
+# --- Rate limiting ---------------------------------------------------------
+#
+# A token bucket per account: RATE_BURST tokens, refilling one per
+# RATE_REFILL_SECONDS. It replaces the profile-token verification this phase
+# cut, and it is the control Phase F was already owed - one mechanism serving
+# both.
+#
+# **Charged per distinct new player, not per request.** Re-submitting an
+# already-analysed player queues nothing and costs $0.00, and that is the
+# property the whole no-verification argument rests on: if a free request
+# still burned quota, the dedup would stop being free. So the bucket is
+# debited only when selection actually found work.
+#
+# A bucket rather than a fixed hourly counter because the product is about
+# comparing players: someone looking at themselves and two friends should not
+# wait three hours. Bursting five and then converging to one per hour keeps
+# first use normal while bounding sustained use to the same rate a flat 1/hour
+# would.
+#
+# **This bounds an account, and accounts are free.** See the note in CLAUDE.md
+# - the real backstop is the budget alarm, and closing the registration hole
+# is future work rather than something this control claims to do.
+RATE_BURST = int(os.environ.get("ANALYSE_RATE_BURST", "5"))
+RATE_REFILL_SECONDS = int(os.environ.get("ANALYSE_RATE_REFILL_SECONDS", "3600"))
+
+
+def take_token(user_id, now=None):
+    """Debit one token, or report how long until the next one.
+
+    Returns (allowed, retry_after_seconds).
+
+    Refill is computed rather than scheduled: the item stores the time the
+    bucket was last full-priced, and how many whole refill periods have
+    elapsed since is arithmetic. That means no timer, no sweeper, and an
+    account that has been idle for a day simply reads as full.
+
+    The whole update is one conditional UpdateItem. Read-then-write would be a
+    race two parallel requests win together - the exact bug a rate limit is
+    supposed to prevent - so the condition carries the decision and a failed
+    condition *is* the rejection.
+    """
+    now = int(time.time()) if now is None else now
+    key = {"PK": f"USER#{user_id}", "SK": "RATE#analyse"}
+
+    item = table.get_item(Key=key).get("Item")
+
+    if not item:
+        tokens, updated = RATE_BURST, now
+    else:
+        tokens = int(item.get("tokens", RATE_BURST))
+        updated = int(item.get("updatedAt", now))
+        earned = (now - updated) // RATE_REFILL_SECONDS
+        if earned > 0:
+            tokens = min(RATE_BURST, tokens + earned)
+            # Advance by whole periods only, so the remainder still counts
+            # towards the next token rather than being rounded away on every
+            # call. Without this, frequent polling would refill nothing.
+            updated += earned * RATE_REFILL_SECONDS
+
+    if tokens <= 0:
+        return False, max(1, (updated + RATE_REFILL_SECONDS) - now)
+
+    try:
+        table.update_item(
+            Key=key,
+            UpdateExpression=(
+                "SET tokens = :t, updatedAt = :u, expiresAt = :x"
+            ),
+            # Guards the read above: if another request debited between the
+            # GetItem and here, the stored count no longer matches what this
+            # call decided from, and it loses rather than double-spending.
+            ConditionExpression=(
+                "attribute_not_exists(tokens) OR tokens = :expected"
+            ),
+            ExpressionAttributeValues={
+                ":t": tokens - 1,
+                ":u": updated,
+                ":expected": int(item["tokens"]) if item else 0,
+                # Swept by the same TTL the OAuth flow uses. A bucket that has
+                # had time to refill completely is indistinguishable from no
+                # bucket at all, so letting it be deleted costs nothing.
+                ":x": now + (RATE_BURST + 1) * RATE_REFILL_SECONDS,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        # Lost the race. One token's worth of pessimism is the right answer
+        # here: the competing request got it.
+        return False, RATE_REFILL_SECONDS
+
+    return True, 0
 
 
 def _response(status, body):
@@ -207,6 +303,25 @@ def handler(event, context):
                 "hint": f"POST /games with {username} first",
             },
         )
+
+    # Charged only now, and only if there is real work. Selection has already
+    # skipped games evaluated at this depth, so a player who is fully analysed
+    # reaches here with an empty todo and pays nothing - which is what keeps
+    # re-submission free and is the reason verification could be cut.
+    if todo:
+        allowed, retry_after = take_token(user_id)
+        if not allowed:
+            return _response(
+                429,
+                {
+                    "error": "rate limit exceeded",
+                    "hint": (
+                        "Analysing a new player is limited per account. "
+                        "Already-analysed players are always free."
+                    ),
+                    "retryAfter": retry_after,
+                },
+            )
 
     queued = fan_out(pk, todo, user_id)
 

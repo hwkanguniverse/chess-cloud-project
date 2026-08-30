@@ -169,6 +169,33 @@ variable "player_timeout" {
   default     = 25
 }
 
+variable "analyse_rate_burst" {
+  description = <<-EOT
+    Tokens in a caller's bucket for POST /analyse. Charged per distinct new
+    player, never for a re-submit that queues nothing - the dedup has to stay
+    free or the argument for cutting verification stops holding.
+
+    Five rather than one because the product is about comparing players, and a
+    flat one-per-hour makes looking at yourself and two friends a three-hour
+    job. Sustained use still converges to the refill rate.
+  EOT
+  type        = number
+  default     = 5
+}
+
+variable "analyse_rate_refill_seconds" {
+  description = <<-EOT
+    How long one token takes to come back: the sustained rate for new players.
+    At the measured $0.057 worst case per player, one per hour caps a
+    determined account at ~$1.37/day.
+
+    This bounds an *account*, and accounts are free - see the registration note
+    in CLAUDE.md. The budget alarm remains the real backstop.
+  EOT
+  type        = number
+  default     = 3600
+}
+
 variable "eval_classes" {
   description = <<-EOT
     Time controls worth evaluating. Daily is excluded: a correspondence player
@@ -312,11 +339,16 @@ resource "aws_iam_role_policy" "analyse" {
     Statement = [
       {
         Effect = "Allow"
-        # Query only, and only to confirm the player has stored games before
-        # queueing work against them. This route writes nothing: the evaluator
-        # owns the eval fields, and the route that asks for evaluation has no
-        # business modifying the table.
-        Action   = ["dynamodb:Query"]
+        # Query to select the games needing evaluation; GetItem and UpdateItem
+        # for the caller's rate-limit bucket, and nothing else. This route
+        # still writes no *game* data - the evaluator owns the eval fields, and
+        # the route that asks for evaluation has no business modifying them.
+        # The only item it writes is USER#<sub> / RATE#analyse.
+        Action = [
+          "dynamodb:Query",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+        ]
         Resource = local.table_arn
       },
       {
@@ -542,6 +574,9 @@ resource "aws_lambda_function" "analyse" {
       EVAL_DEPTH           = tostring(var.eval_depth)
       EVAL_CLASSES         = join(",", var.eval_classes)
       EVAL_GAMES_PER_CLASS = tostring(var.eval_games_per_class)
+
+      ANALYSE_RATE_BURST          = tostring(var.analyse_rate_burst)
+      ANALYSE_RATE_REFILL_SECONDS = tostring(var.analyse_rate_refill_seconds)
     }
   }
 
