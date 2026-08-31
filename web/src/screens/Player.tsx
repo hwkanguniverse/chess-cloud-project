@@ -211,7 +211,10 @@ export default function Player() {
           `Already being analysed: ${result.alreadyQueued.toLocaleString()} games in progress.`,
         );
       } else if (result.queued > 0) {
-        setAnalyseNote(`Queued ${result.queued.toLocaleString()} games.`);
+        setAnalyseNote(
+          `Queued ${result.queued.toLocaleString()} games — this runs in the ` +
+            `background, so you can leave this page.`,
+        );
         // Start the poll immediately rather than waiting for the next tick, so
         // the progress bar appears on click rather than five seconds later.
         outstanding.current = result.queued;
@@ -291,6 +294,12 @@ export default function Player() {
         <p className="stats-pending muted">
           Reading {months.length.toLocaleString()} months of history&hellip;
           Totals appear once every month is in.
+          {/* A heavy account is 150+ archives fetched one at a time, which is
+              tens of minutes. Without saying so the page looks like something
+              you have to sit and watch - months are written as they land, so
+              leaving and coming back loses nothing. */}
+          <br />
+          You can leave this page — progress is saved as each month arrives.
         </p>
       ) : (
       <div className="stats">
@@ -551,15 +560,24 @@ function Evaluation({
       )}
 
       {running && (
-        <div className="progress-row">
-          <span className="label">Evaluating</span>
-          <span className="bar">
-            <ProgressBar value={percent} height={8} />
-          </span>
-          <span className="muted small">
-            {evaluated.toLocaleString()} / {inScope.toLocaleString()}
-          </span>
-        </div>
+        <>
+          <div className="progress-row">
+            <span className="label">Evaluating</span>
+            <span className="bar">
+              <ProgressBar value={percent} height={8} />
+            </span>
+            <span className="muted small">
+              {evaluated.toLocaleString()} / {inScope.toLocaleString()}
+            </span>
+          </div>
+          {/* Same reason as the ingest notice: ~20 minutes of engine work on a
+              full batch, and each game's result is written as it finishes. The
+              queue does not care whether anyone is watching. */}
+          <p className="muted small">
+            You can leave this page — the engine keeps going, and results are
+            saved game by game.
+          </p>
+        </>
       )}
 
       {/* Games that will never be evaluated are stated rather than left as an
