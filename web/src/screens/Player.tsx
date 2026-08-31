@@ -610,7 +610,20 @@ function PhaseChart({
   // the rise, which is the whole thing the chart is claiming.
   const W = 320;
   const H = 96;
-  const top = Math.max(...points.map((p) => p.m)) * 1.15;
+
+  // Round the top up to a clean number so the axis reads 0/50/100 rather than
+  // 0/54.6/109.2. Ticks a reader cannot say out loud are not worth drawing.
+  //
+  // The step is chosen from the *rounded* top rather than the raw peak, and the
+  // top is the next round number above the peak rather than above peak x 1.1.
+  // Padding first and rounding second compounds: a peak of 94.9 became a top of
+  // 125, squashing the curve into three-quarters of the plot for no reason.
+  const peak = Math.max(...points.map((p) => p.m));
+  const step = peak <= 40 ? 10 : peak <= 100 ? 25 : peak <= 200 ? 50 : 100;
+  const top = Math.max(step, Math.ceil(peak / step) * step);
+  const ticks: number[] = [];
+  for (let v = 0; v <= top; v += step) ticks.push(v);
+
   const x = (i: number) => (i / (means.length - 1)) * W;
   const y = (m: number) => H - (m / top) * H;
 
@@ -618,37 +631,71 @@ function PhaseChart({
   const area = `${x(points[0].i)},${H} ${line} ${x(points[points.length - 1].i)},${H}`;
 
   const worst = points.reduce((a, b) => (b.m > a.m ? b : a));
-  const best = points.reduce((a, b) => (b.m < a.m ? b : a));
 
   return (
     <div className="phases">
-      <span className="label">Where the mistakes happen</span>
+      <div className="phase-head">
+        <span className="label">Where the mistakes happen</span>
+        {/* "Lower is better" earns its place: up meaning worse is the opposite
+            of most charts a reader has seen, and nothing else on the page
+            says so. */}
+        <span className="muted small">
+          avg centipawn loss per move · lower is better
+        </span>
+      </div>
 
-      <svg
-        className="phase-chart"
-        viewBox={`0 0 ${W} ${H}`}
-        preserveAspectRatio="none"
-        role="img"
-        aria-label={
-          `Average centipawn loss across the game, from ` +
-          `${Math.round(points[0].m)} at the start to ` +
-          `${Math.round(points[points.length - 1].m)} at the end.`
-        }
-      >
-        <polygon points={area} fill="var(--loss-soft)" />
-        <polyline
-          points={line}
-          fill="none"
-          stroke="var(--loss)"
-          strokeWidth="2"
-          strokeLinejoin="round"
-          strokeLinecap="round"
-          vectorEffect="non-scaling-stroke"
-        />
-        {/* The single worst bucket, marked - the chart's one claim. */}
-        <circle cx={x(worst.i)} cy={y(worst.m)} r="3" fill="var(--loss)"
-          vectorEffect="non-scaling-stroke" />
-      </svg>
+      <div className="phase-plot">
+        {/* Labels live in HTML, not in the SVG: preserveAspectRatio="none"
+            stretches the viewBox horizontally to fill the column, which would
+            smear any text drawn inside it. */}
+        <div className="phase-y" aria-hidden="true">
+          {[...ticks].reverse().map((v) => (
+            <span key={v}>{v}</span>
+          ))}
+        </div>
+
+        <svg
+          className="phase-chart"
+          viewBox={`0 0 ${W} ${H}`}
+          preserveAspectRatio="none"
+          role="img"
+          aria-label={
+            `Average centipawn loss per move across the game, on a scale of 0 ` +
+            `to ${top}. Lower is better. Rises from ` +
+            `${Math.round(points[0].m)} in the opening to a worst of ` +
+            `${Math.round(worst.m)}.`
+          }
+        >
+          {/* Gridlines at the labelled values, so a reader can measure the
+              curve rather than only see its shape. The zero line doubles as
+              the axis. */}
+          {ticks.map((v) => (
+            <line
+              key={v}
+              x1="0"
+              x2={W}
+              y1={y(v)}
+              y2={y(v)}
+              stroke={v === 0 ? "var(--border-strong)" : "var(--border)"}
+              strokeWidth="1"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+          <polygon points={area} fill="var(--loss-soft)" />
+          <polyline
+            points={line}
+            fill="none"
+            stroke="var(--loss)"
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round"
+            vectorEffect="non-scaling-stroke"
+          />
+          {/* The single worst bucket, marked - the chart's one claim. */}
+          <circle cx={x(worst.i)} cy={y(worst.m)} r="3" fill="var(--loss)"
+            vectorEffect="non-scaling-stroke" />
+        </svg>
+      </div>
 
       {/* Hover gives the number and how many moves it rests on, so a point
           computed from a handful of moves is not read as confidently as one
@@ -672,17 +719,16 @@ function PhaseChart({
         <span>Endgame</span>
       </div>
 
+      {/* The axis now carries the numbers, so all that is left to say is the
+          thing the aggregate genuinely hides: measured on theohwk, short games
+          get much worse late (28 to 121 cp) while long games peak in the
+          middle and recover. A game that ends early often ends *because* of a
+          blunder, so "worse later" is partly a tautology. */}
       <p className="muted small">
-        Averages {Math.round(best.m)} cp per move early and{" "}
-        {Math.round(worst.m)} cp at its worst, over {games.toLocaleString()}{" "}
-        evaluated {games === 1 ? "game" : "games"} loaded.
-        {/* The aggregate genuinely hides this, so it is stated rather than
-            left for the reader to be misled by: measured on theohwk, short
-            games get much worse late (28 to 121 cp) while long games peak in
-            the middle and recover. A game that ends early often ends
-            *because* of a blunder, so "worse later" is partly a tautology. */}
-        {" "}Games that end early pull the later part of the curve up — a short
-        game often ends because of the blunder itself.
+        Over {games.toLocaleString()} evaluated{" "}
+        {games === 1 ? "game" : "games"} loaded. Games that end early pull the
+        later part of the curve up — a short game often ends because of the
+        blunder itself.
       </p>
     </div>
   );

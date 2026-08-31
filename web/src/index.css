@@ -440,6 +440,44 @@ section > .stats > :last-child {
   margin-bottom: var(--sp-6);
 }
 
+.phase-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+/* A fixed gutter for the y labels, then the plot. Everything below the plot
+   (the hover strip, the phase labels) uses the same gutter so the columns line
+   up with the curve rather than with the container. */
+.phases {
+  --phase-gutter: 2.5rem;
+}
+
+.phase-plot {
+  display: grid;
+  grid-template-columns: var(--phase-gutter) 1fr;
+  margin-top: var(--sp-3);
+}
+
+/* Labels sit at the gridlines: first and last align to the top and bottom of
+   the plot, the rest space evenly between. space-between over a box the exact
+   height of the plot does that without any per-tick arithmetic. */
+.phase-y {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  height: 96px;
+  padding-right: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  color: var(--text-faint);
+  /* Centre each label on its line rather than hanging below it. */
+  margin: -0.5em 0;
+}
+
 .phase-chart {
   display: block;
   width: 100%;
@@ -447,7 +485,6 @@ section > .stats > :last-child {
      the message, and letting it scale with viewport width would flatten it on
      a wide screen and exaggerate it on a narrow one. */
   height: 96px;
-  margin: var(--sp-3) 0 0;
   overflow: visible;
 }
 
@@ -457,7 +494,7 @@ section > .stats > :last-child {
   display: grid;
   grid-template-columns: repeat(10, 1fr);
   height: var(--sp-4);
-  margin-top: calc(var(--sp-4) * -1);
+  margin: calc(var(--sp-4) * -1) 0 0 var(--phase-gutter);
 }
 
 .phase-ticks > span {
@@ -471,8 +508,8 @@ section > .stats > :last-child {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   text-align: center;
+  margin-left: var(--phase-gutter);
   padding-top: var(--sp-2);
-  border-top: 1px solid var(--border);
   font-size: var(--fs-xs);
   color: var(--text-muted);
   text-transform: uppercase;
