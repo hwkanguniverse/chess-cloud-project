@@ -99,6 +99,7 @@ def evaluation_state(pk):
     evaluated = 0
     outstanding = 0
     excluded = {}
+    capped = False
 
     kwargs = {
         "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
@@ -127,6 +128,15 @@ def evaluation_state(pk):
                 evaluated += 1
             else:
                 outstanding += 1
+        # Same early exit as analyse.py's selection, and for the same reason:
+        # once every class is full, the rest of the partition is older than
+        # everything already counted and cannot change the answer. Without it
+        # this route read all 70,344 of Hikaru's games on every page load and
+        # took 23 seconds against a 25s timeout.
+        if all(per_class.get(c, 0) >= GAMES_PER_CLASS for c in EVAL_CLASSES):
+            capped = True
+            break
+
         if "LastEvaluatedKey" not in page:
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
@@ -137,6 +147,9 @@ def evaluation_state(pk):
         "inScope": evaluated + outstanding,
         "byClass": per_class,
         "excluded": excluded,
+        # Selection stopped early because every class was full, so `excluded`
+        # counts what was seen rather than the player's whole history.
+        "excludedPartial": capped,
         "depth": DEPTH,
     }
 

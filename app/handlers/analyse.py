@@ -283,6 +283,11 @@ def select_games(pk):
     a per-player check would never pick those up. The same insight as the
     ETag, one layer down.
 
+    Stops as soon as every evaluable class is full. Games are newest-first, so
+    nothing beyond that point could be selected - and for a prolific player the
+    difference is decisive rather than merely faster: 70,344 games read to pick
+    300 exceeded the Lambda timeout.
+
     Time controls outside EVAL_CLASSES are excluded before the cap is applied,
     so excluding daily does not consume a slot that a blitz game could have
     used. They are returned as their own count rather than folded into
@@ -294,6 +299,9 @@ def select_games(pk):
     skipped = 0
     excluded = {}
     seen_any = False
+    # True when the walk stopped early because every class was full, which
+    # makes `excluded` a count of what was seen rather than the player's total.
+    capped = False
 
     kwargs = {
         "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
@@ -326,11 +334,25 @@ def select_games(pk):
                 skipped += 1
                 continue
             todo.append(item["SK"])
+        # Stop once every evaluable class has hit its cap. Reading on would
+        # change nothing: games are newest-first, so everything beyond this
+        # point is older than something already selected and could only be
+        # skipped.
+        #
+        # This is not an optimisation, it is the difference between working and
+        # not. Hikaru has 70,344 games; without this the Lambda read all of
+        # them to select 300 and **timed out at 20s**, returning a 500. The
+        # loop always stopped *adding* at the cap but kept *reading* to the end
+        # of the partition.
+        if all(per_class.get(c, 0) >= GAMES_PER_CLASS for c in EVAL_CLASSES):
+            capped = True
+            break
+
         if "LastEvaluatedKey" not in page:
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
-    return todo, skipped, per_class, excluded, seen_any
+    return todo, skipped, per_class, excluded, seen_any, capped
 
 
 def fan_out(pk, sks, user_id):
@@ -378,7 +400,7 @@ def handler(event, context):
         return _response(400, {"error": "malformed username"})
 
     pk = f"PLAYER#{platform}#{username}"
-    todo, skipped, per_class, excluded, seen_any = select_games(pk)
+    todo, skipped, per_class, excluded, seen_any, capped = select_games(pk)
 
     # The player must already be ingested. Evaluation reads stored PGNs, so
     # asking to analyse a player nobody has fetched is a request for work that
@@ -459,7 +481,14 @@ def handler(event, context):
             # evaluated by design. Reported so a player whose history is
             # mostly correspondence gets an explanation rather than a
             # suspiciously small queued count.
+            #
+            # `excludedPartial` says this is what was seen before selection
+            # stopped, not the player's total - the walk ends as soon as every
+            # class is full, so for a prolific player most of their history is
+            # never read. Reporting 188 as if it were a total would be a quiet
+            # lie about a number nobody could check.
             "excluded": excluded,
+            **({"excludedPartial": True} if capped else {}),
             "statusUrl": f"/player/{platform}/{username}",
         },
     )

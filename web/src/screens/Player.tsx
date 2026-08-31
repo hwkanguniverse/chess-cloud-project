@@ -479,7 +479,8 @@ function Evaluation({
         })()
       : null;
 
-  const { evaluated, outstanding, inScope, excluded, depth } = state;
+  const { evaluated, outstanding, inScope, excluded, excludedPartial, depth } =
+    state;
 
   // `outstanding` counts games without evals - which is every in-scope game
   // for a player nobody has analysed yet. It says nothing about whether a run
@@ -604,7 +605,10 @@ function Evaluation({
 
       {/* Games that will never be evaluated are stated rather than left as an
           unexplained gap between the game count and the evaluated count. */}
-      {excludedTotal > 0 && (
+      {/* Suppressed when the count is partial: selection stopped before
+          reaching most of a prolific player's history, so "0 daily games not
+          evaluated" would be false and "188" would be an arbitrary fraction. */}
+      {excludedTotal > 0 && !excludedPartial && (
         <p className="muted small">
           {Object.entries(excluded)
             .map(([name, n]) => `${n.toLocaleString()} ${name}`)

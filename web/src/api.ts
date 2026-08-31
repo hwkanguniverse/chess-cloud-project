@@ -126,6 +126,12 @@ export interface EvaluationState {
   inScope: number;
   byClass: Record<string, number>;
   excluded: Record<string, number>;
+  /**
+   * True when selection stopped early because every time control was full, so
+   * `excluded` counts what was seen rather than the player's whole history. A
+   * prolific player's daily games may never be reached at all.
+   */
+  excludedPartial?: boolean;
   depth: number;
 }
 
