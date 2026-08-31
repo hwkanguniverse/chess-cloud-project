@@ -166,6 +166,95 @@ def take_token(user_id, now=None):
     return True, 0
 
 
+# --- In-flight claims ------------------------------------------------------
+#
+# Selection's dedup asks each game whether it already has evals at this depth,
+# and a game is only stamped once the engine has *finished* it. So for the
+# whole length of a run - 14 minutes for theohwk's 201 games - every queued
+# game still answers "not evaluated", and a second POST /analyse re-queues all
+# of them.
+#
+# Measured, not theorised: a re-submit mid-run produced 402 messages for 201
+# games and spent a second token. 166 duplicates were absorbed by the worker's
+# guard for a GetItem each, but **17 games were evaluated twice** - the
+# duplicate arriving while the original was mid-engine, so both GetItem checks
+# saw an unevaluated game.
+#
+# One claim item per player rather than a marker on each of 201 games: that
+# would turn a read-only front door into a bulk writer and need
+# BatchWriteItem, an action this project has been caught missing twice.
+#
+# It expires rather than being cleared. A claim that can only be set is a trap
+# - a crashed run would wedge the player forever - so the window ages out and
+# the next request proceeds normally. Same reasoning as the ETag and the
+# evalDepth guard.
+CLAIM_SECONDS = int(os.environ.get("ANALYSE_CLAIM_SECONDS", "1200"))
+
+
+def claim_player(pk, games, now=None):
+    """Claim a player's evaluation run, or report the live claim's age.
+
+    Returns (claimed, already_queued). `already_queued` is the game count the
+    live claim recorded, so the caller can say what is already in flight
+    rather than only refusing.
+
+    The condition does the deciding, exactly as take_token does: a claim is
+    written only when none is live, and losing that race is indistinguishable
+    from finding a live claim - both mean somebody else is already running it.
+    """
+    now = int(time.time()) if now is None else now
+    key = {"PK": pk, "SK": "ANALYSE#claim"}
+
+    existing = table.get_item(Key=key).get("Item")
+    if existing and int(existing.get("expiresAt", 0)) > now:
+        return False, int(existing.get("games", 0))
+
+    try:
+        table.update_item(
+            Key=key,
+            UpdateExpression=(
+                "SET queuedAt = :q, games = :g, expiresAt = :x"
+            ),
+            # Absent or expired, checked server-side. DynamoDB's TTL sweep is
+            # asynchronous - up to ~48h late - so an expired claim may still be
+            # present, and the condition has to treat "expired" as "absent"
+            # itself rather than trusting the sweep to have run.
+            ConditionExpression=(
+                "attribute_not_exists(expiresAt) OR expiresAt <= :now"
+            ),
+            ExpressionAttributeValues={
+                ":q": now,
+                ":g": games,
+                ":x": now + CLAIM_SECONDS,
+                ":now": now,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        # Another request claimed it between the read and the write. Same
+        # answer as finding a live claim: it is already running.
+        return False, games
+
+    return True, 0
+
+
+def release_claim(pk):
+    """Drop a claim whose run never started.
+
+    Only for the path where the claim was written and then the request failed
+    before fanning out. A claim is otherwise left to expire: a *successful*
+    run must keep it for the whole window, which is the entire point.
+    """
+    try:
+        table.delete_item(Key={"PK": pk, "SK": "ANALYSE#claim"})
+    except ClientError:
+        # Best effort. The claim expires on its own, so a failed delete costs
+        # the user a wait rather than correctness - not worth failing the
+        # request that is already returning an error.
+        pass
+
+
 def _response(status, body):
     return {
         "statusCode": status,
@@ -304,6 +393,28 @@ def handler(event, context):
             },
         )
 
+    # Claimed before the token is charged, so a request that is refused for
+    # duplicating a live run costs nothing. The other order would take a token
+    # and then decline to do any work with it.
+    if todo:
+        claimed, already_queued = claim_player(pk, len(todo))
+        if not claimed:
+            # Not an error: the work the caller asked for is already happening.
+            # 202 with queued 0 says exactly that, and matches the shape of a
+            # fully-evaluated player - both mean "nothing for you to pay for".
+            return _response(
+                202,
+                {
+                    "player": f"{platform}/{username}",
+                    "queued": 0,
+                    "skipped": skipped,
+                    "byClass": per_class,
+                    "excluded": excluded,
+                    "alreadyQueued": already_queued,
+                    "statusUrl": f"/player/{platform}/{username}",
+                },
+            )
+
     # Charged only now, and only if there is real work. Selection has already
     # skipped games evaluated at this depth, so a player who is fully analysed
     # reaches here with an empty todo and pays nothing - which is what keeps
@@ -311,6 +422,11 @@ def handler(event, context):
     if todo:
         allowed, retry_after = take_token(user_id)
         if not allowed:
+            # Nothing was queued, so the claim written moments ago describes a
+            # run that is not happening. Leaving it would lock the player out
+            # for the full window on a request that did no work - and the user
+            # would be told to come back later twice over.
+            release_claim(pk)
             return _response(
                 429,
                 {

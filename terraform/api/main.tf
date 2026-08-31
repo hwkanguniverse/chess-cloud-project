@@ -196,6 +196,25 @@ variable "analyse_rate_refill_seconds" {
   default     = 3600
 }
 
+variable "analyse_claim_seconds" {
+  description = <<-EOT
+    How long one player's evaluation run is claimed for, so a second request
+    while it is still going returns queued 0 rather than re-queueing every game
+    and spending a second token.
+
+    Selection's dedup only sees games the engine has *finished*, so without
+    this the whole length of a run is a window in which every queued game still
+    looks unevaluated. Measured: a re-submit mid-run made 402 messages for 201
+    games and evaluated 17 of them twice.
+
+    Sized to cover a full batch - 201 games on 8 tasks measured at 13.9 min -
+    with margin. It expires rather than being cleared, so a crashed run cannot
+    wedge a player permanently.
+  EOT
+  type        = number
+  default     = 1200
+}
+
 variable "eval_classes" {
   description = <<-EOT
     Time controls worth evaluating. Daily is excluded: a correspondence player
@@ -339,15 +358,20 @@ resource "aws_iam_role_policy" "analyse" {
     Statement = [
       {
         Effect = "Allow"
-        # Query to select the games needing evaluation; GetItem and UpdateItem
-        # for the caller's rate-limit bucket, and nothing else. This route
-        # still writes no *game* data - the evaluator owns the eval fields, and
-        # the route that asks for evaluation has no business modifying them.
-        # The only item it writes is USER#<sub> / RATE#analyse.
+        # Query to select the games needing evaluation; GetItem, UpdateItem and
+        # DeleteItem for the caller's rate-limit bucket and the per-player
+        # in-flight claim. This route still writes no *game* data - the
+        # evaluator owns the eval fields, and the route that asks for
+        # evaluation has no business modifying them. The only items it writes
+        # are USER#<sub> / RATE#analyse and PLAYER#... / ANALYSE#claim.
+        #
+        # DeleteItem is only ever used to release a claim whose run never
+        # started, because the request was rate-limited after claiming.
         Action = [
           "dynamodb:Query",
           "dynamodb:GetItem",
           "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
         ]
         Resource = local.table_arn
       },
@@ -577,6 +601,7 @@ resource "aws_lambda_function" "analyse" {
 
       ANALYSE_RATE_BURST          = tostring(var.analyse_rate_burst)
       ANALYSE_RATE_REFILL_SECONDS = tostring(var.analyse_rate_refill_seconds)
+      ANALYSE_CLAIM_SECONDS       = tostring(var.analyse_claim_seconds)
     }
   }
 
