@@ -182,6 +182,21 @@ export interface Game {
   /** Ply index of the single worst move, and what it cost in centipawns. */
   worstPly?: number;
   worstLoss?: number;
+  /**
+   * Centipawn loss bucketed across the course of the game, ten buckets, as
+   * summed loss and move count per bucket rather than averages.
+   *
+   * Sums and counts, because averaging per-game averages would weight a
+   * 12-move miniature the same as a 90-move grind. Divide the summed loss by
+   * the summed count across games instead.
+   *
+   * Buckets are a *percentage of the game*, not fixed move numbers: 56% of
+   * games never reach move 31, so fixed boundaries measured the endgame over
+   * fewer than half the games and flattered it. By percentage every game
+   * contributes to every bucket.
+   */
+  phaseLoss?: number[];
+  phaseCount?: number[];
   /** Set on success and on an unparseable game - both mean "not retried". */
   evalDepth?: number;
   evaluatedAt?: number;

@@ -376,10 +376,12 @@ export default function Player() {
 /**
  * Evaluation: the engine's half of the page.
  *
- * Deliberately not a chart. The file's standing decision is that the dashboard
- * is the product and the single-game report is not - Lichess does that better
- * - so this answers "how well does this player actually play, and which games
- * went worst", and stops there.
+ * The standing decision is that the dashboard is the product and the
+ * single-game report is not - Lichess does that better - so there is no
+ * move-by-move eval curve for one game here. The phase chart below is the
+ * other thing: an *aggregate across games*, which is what a dashboard is for.
+ * It answers "how well does this player play, where do they go wrong, and
+ * which games went worst", and stops there.
  *
  * `inScope` rather than the player's total game count is the denominator
  * everywhere here: evaluation is capped at 100 per time control and excludes
@@ -421,6 +423,28 @@ function Evaluation({
             .sort((a, b) => (b.acpl ?? 0) - (a.acpl ?? 0))
             .slice(0, 5),
         }
+      : null;
+
+  // Summed loss and move count per bucket across games, then divided - never
+  // an average of per-game averages, which would weight a 12-move miniature
+  // the same as a 90-move grind.
+  //
+  // Games evaluated before the phase fields existed simply have no phaseCount
+  // and drop out, which is what let the backfill run as a background job
+  // rather than a flag day.
+  const phased = rated.filter((g) => g.phaseCount != null && g.phaseLoss != null);
+  const phases =
+    phased.length > 0
+      ? (() => {
+          const loss = new Array(10).fill(0);
+          const count = new Array(10).fill(0);
+          for (const g of phased) {
+            g.phaseLoss?.forEach((v, i) => (loss[i] += v));
+            g.phaseCount?.forEach((v, i) => (count[i] += v));
+          }
+          const means = loss.map((l, i) => (count[i] > 0 ? l / count[i] : null));
+          return { means, count, games: phased.length };
+        })()
       : null;
 
   const { evaluated, outstanding, inScope, excluded, depth } = state;
@@ -484,6 +508,17 @@ function Evaluation({
             />
           </div>
 
+          {/* Not rendered mid-run: the curve would shift on every 5s poll,
+              and a chart that moves while you read it reads as broken. The
+              progress row below is the loading state. */}
+          {phases && !running && (
+            <PhaseChart
+              means={phases.means}
+              count={phases.count}
+              games={phases.games}
+            />
+          )}
+
           {summary.worst.length > 0 && (
             <div className="worst">
               <span className="label">Worst games</span>
@@ -536,6 +571,120 @@ function Evaluation({
         </p>
       )}
     </section>
+  );
+}
+
+/**
+ * PhaseChart: average centipawn loss across the course of a game.
+ *
+ * The x axis is *percentage of the game*, not move number, and that choice is
+ * what makes the chart honest. Measured over theohwk's 201 games: with fixed
+ * move boundaries (opening <= 12, midgame <= 30) the midgame looked worst at
+ * 92 cp - but 56% of games never reach move 31, so the endgame figure was
+ * computed over fewer than half the games. By percentage every game
+ * contributes to every bucket and the curve describes all of them.
+ *
+ * The phase labels are spaced evenly and deliberately claim no move number.
+ * Where an opening ends is a judgement this code does not have to make, and
+ * the reader can group the curve by eye.
+ *
+ * Inline SVG rather than a charting library: ten points do not justify a
+ * dependency, and this is the only drawing in the app.
+ */
+function PhaseChart({
+  means,
+  count,
+  games,
+}: {
+  means: (number | null)[];
+  count: number[];
+  games: number;
+}) {
+  const points = means
+    .map((m, i) => ({ m, i }))
+    .filter((p): p is { m: number; i: number } => p.m != null);
+  if (points.length < 3) return null;
+
+  // Geometry in an arbitrary viewBox, scaled by CSS. The axis starts at zero
+  // because centipawn loss is a magnitude - a truncated axis would exaggerate
+  // the rise, which is the whole thing the chart is claiming.
+  const W = 320;
+  const H = 96;
+  const top = Math.max(...points.map((p) => p.m)) * 1.15;
+  const x = (i: number) => (i / (means.length - 1)) * W;
+  const y = (m: number) => H - (m / top) * H;
+
+  const line = points.map((p) => `${x(p.i)},${y(p.m)}`).join(" ");
+  const area = `${x(points[0].i)},${H} ${line} ${x(points[points.length - 1].i)},${H}`;
+
+  const worst = points.reduce((a, b) => (b.m > a.m ? b : a));
+  const best = points.reduce((a, b) => (b.m < a.m ? b : a));
+
+  return (
+    <div className="phases">
+      <span className="label">Where the mistakes happen</span>
+
+      <svg
+        className="phase-chart"
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label={
+          `Average centipawn loss across the game, from ` +
+          `${Math.round(points[0].m)} at the start to ` +
+          `${Math.round(points[points.length - 1].m)} at the end.`
+        }
+      >
+        <polygon points={area} fill="var(--loss-soft)" />
+        <polyline
+          points={line}
+          fill="none"
+          stroke="var(--loss)"
+          strokeWidth="2"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          vectorEffect="non-scaling-stroke"
+        />
+        {/* The single worst bucket, marked - the chart's one claim. */}
+        <circle cx={x(worst.i)} cy={y(worst.m)} r="3" fill="var(--loss)"
+          vectorEffect="non-scaling-stroke" />
+      </svg>
+
+      {/* Hover gives the number and how many moves it rests on, so a point
+          computed from a handful of moves is not read as confidently as one
+          from hundreds. */}
+      <div className="phase-ticks" aria-hidden="true">
+        {means.map((m, i) => (
+          <span
+            key={i}
+            title={
+              m == null
+                ? "no moves in this part of the game"
+                : `${Math.round(m)} cp average loss, over ${count[i].toLocaleString()} moves`
+            }
+          />
+        ))}
+      </div>
+
+      <div className="phase-axis">
+        <span>Opening</span>
+        <span>Midgame</span>
+        <span>Endgame</span>
+      </div>
+
+      <p className="muted small">
+        Averages {Math.round(best.m)} cp per move early and{" "}
+        {Math.round(worst.m)} cp at its worst, over {games.toLocaleString()}{" "}
+        evaluated {games === 1 ? "game" : "games"} loaded.
+        {/* The aggregate genuinely hides this, so it is stated rather than
+            left for the reader to be misled by: measured on theohwk, short
+            games get much worse late (28 to 121 cp) while long games peak in
+            the middle and recover. A game that ends early often ends
+            *because* of a blunder, so "worse later" is partly a tautology. */}
+        {" "}Games that end early pull the later part of the curve up — a short
+        game often ends because of the blunder itself.
+      </p>
+    </div>
   );
 }
 

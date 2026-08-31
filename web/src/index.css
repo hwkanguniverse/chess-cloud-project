@@ -431,3 +431,51 @@ section > .stats > :last-child {
   flex-direction: column;
   gap: var(--sp-1);
 }
+
+/* --- Where the mistakes happen -------------------------------------------
+   The app's only chart. Ten buckets across the course of a game, so the x axis
+   is a proportion rather than a move number - see PhaseChart for why that
+   choice is what makes it honest. */
+.phases {
+  margin-bottom: var(--sp-6);
+}
+
+.phase-chart {
+  display: block;
+  width: 100%;
+  /* Fixed height with preserveAspectRatio="none": the shape of the curve is
+     the message, and letting it scale with viewport width would flatten it on
+     a wide screen and exaggerate it on a narrow one. */
+  height: 96px;
+  margin: var(--sp-3) 0 0;
+  overflow: visible;
+}
+
+/* Sits directly under the plot and shares its geometry, so each invisible cell
+   lines up with the bucket above it and carries that bucket's tooltip. */
+.phase-ticks {
+  display: grid;
+  grid-template-columns: repeat(10, 1fr);
+  height: var(--sp-4);
+  margin-top: calc(var(--sp-4) * -1);
+}
+
+.phase-ticks > span {
+  cursor: help;
+}
+
+/* Three equal thirds, each label centred in its own. Evenly spaced and
+   claiming no move number: where an opening ends is a judgement this does not
+   have to make, and the reader can group the curve by eye. */
+.phase-axis {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  text-align: center;
+  padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
+  font-size: var(--fs-xs);
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  margin-bottom: var(--sp-3);
+}

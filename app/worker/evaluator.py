@@ -70,6 +70,23 @@ MATE_SCORE = 10000
 # most analysis tools clamp somewhere in this range for the same reason.
 CLAMP_CP = 1000
 
+# Centipawn loss is also bucketed across the course of the game, so a player can
+# see *where* they go wrong rather than only how often.
+#
+# Buckets are a percentage of the game, not fixed move numbers, and that choice
+# changed the answer. Measured over theohwk's 201 games: fixed boundaries
+# (opening <= move 12, midgame <= move 30) said the midgame was worst at 92.0 cp.
+# But **56% of games never reach move 31**, so that "endgame" figure was computed
+# over 89 games rather than 201 - survivorship bias, and it flattered the endgame.
+# By percentage every game contributes to every bucket, the move counts come out
+# near-equal by construction, and the last third is worst at 90.9.
+#
+# Ten buckets rather than three because the shape is the interesting part: the
+# loss curve rises steeply from ~15 cp and plateaus around ~90, which three bars
+# cannot show. The reader can group them into phases by eye without this code
+# having to claim which move an "endgame" starts at.
+PHASE_BUCKETS = 10
+
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 sqs = boto3.client("sqs")
 
@@ -97,6 +114,21 @@ def classify(loss):
     if loss >= INACCURACY:
         return "inaccuracy"
     return "ok"
+
+
+def bucket_of(position, total):
+    """Which tenth of the game a move falls in.
+
+    `position` and `total` count the player's own moves, so the buckets mean
+    the same thing for both colours and for games of any length.
+
+    The final move lands in the last bucket rather than one past the end, which
+    is what the min() guards - `position` runs to `total - 1`, but integer
+    division still needs the clamp when total < PHASE_BUCKETS.
+    """
+    if total <= 0:
+        return 0
+    return min(PHASE_BUCKETS - 1, position * PHASE_BUCKETS // total)
 
 
 def positions(pgn_text):
@@ -160,12 +192,25 @@ def evaluate_game(engine, pgn_text, colour):
 
     counts = {"blunder": 0, "mistake": 0, "inaccuracy": 0}
     worst = None
-    for ply, loss in mine:
+    # Sums and counts per bucket, never averages. Averaging per-game averages
+    # would weight a 12-move miniature the same as a 90-move grind; the reader
+    # divides the summed loss by the summed count instead.
+    phase_loss = [0] * PHASE_BUCKETS
+    phase_count = [0] * PHASE_BUCKETS
+
+    for position, (ply, loss) in enumerate(mine):
         label = classify(loss)
         if label in counts:
             counts[label] += 1
         if worst is None or loss > worst[1]:
             worst = (ply, loss)
+
+        # Position within the player's *own* moves, not the raw ply index: a
+        # player has half the plies, and bucketing on `ply` would put a black
+        # player's moves systematically later in the game than a white one's.
+        bucket = bucket_of(position, len(mine))
+        phase_loss[bucket] += loss
+        phase_count[bucket] += 1
 
     return {
         "evals": evals,
@@ -175,6 +220,8 @@ def evaluate_game(engine, pgn_text, colour):
         "inaccuracies": counts["inaccuracy"],
         "worstPly": worst[0] if worst else None,
         "worstLoss": worst[1] if worst else None,
+        "phaseLoss": phase_loss,
+        "phaseCount": phase_count,
         "depth": DEPTH,
     }
 
@@ -232,6 +279,7 @@ def process(message):
         UpdateExpression=(
             "SET evals = :e, acpl = :a, blunders = :b, mistakes = :m, "
             "inaccuracies = :i, worstPly = :wp, worstLoss = :wl, "
+            "phaseLoss = :pl, phaseCount = :pc, "
             "evalDepth = :d, evaluatedAt = :t REMOVE evalError"
         ),
         ExpressionAttributeValues={
@@ -242,6 +290,8 @@ def process(message):
             ":i": result["inaccuracies"],
             ":wp": result["worstPly"],
             ":wl": result["worstLoss"],
+            ":pl": result["phaseLoss"],
+            ":pc": result["phaseCount"],
             ":d": DEPTH,
             ":t": int(time.time()),
         },

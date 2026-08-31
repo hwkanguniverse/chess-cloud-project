@@ -82,7 +82,7 @@ def _read_games(pk, archive):
         "ProjectionExpression": (
             "#u, #e, colour, #r, rating, opp, oppRating, tc, #c, "
             "acpl, blunders, mistakes, inaccuracies, worstPly, worstLoss, "
-            "evalDepth, evaluatedAt, evalError"
+            "phaseLoss, phaseCount, evalDepth, evaluatedAt, evalError"
         ),
         "ExpressionAttributeNames": {
             "#u": "url",
