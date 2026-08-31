@@ -82,6 +82,11 @@ export default function Player() {
   const [analysing, setAnalysing] = useState(false);
   const [analyseNote, setAnalyseNote] = useState<string | null>(null);
   const [analyseError, setAnalyseError] = useState<string | null>(null);
+  // Whether a run is actually in flight, which the player route cannot tell us:
+  // it reports how many games lack evals, and for a never-analysed player that
+  // is all of them. Set when this page queues work, or when the API says a run
+  // was already claimed.
+  const [analyseQueued, setAnalyseQueued] = useState(false);
 
   // How far into the COMPLETE archives we have fetched. The list is
   // newest-first, so this walks backwards through the player's history.
@@ -100,6 +105,9 @@ export default function Player() {
       setData(response);
       pending.current = response.pending;
       outstanding.current = response.evaluation?.outstanding ?? 0;
+      // The run finished: drop back to the ordinary state so the panel shows
+      // its result rather than staying stuck in "Analysing".
+      if (outstanding.current === 0) setAnalyseQueued(false);
       setError(null);
       return response.pending;
     } catch (err) {
@@ -205,6 +213,7 @@ export default function Player() {
       const result = await analysePlayer(username, platform);
 
       if (result.alreadyQueued) {
+        setAnalyseQueued(true);
         // Not an error. Somebody - possibly this user in another tab - already
         // started this player, and the request cost no rate-limit token.
         setAnalyseNote(
@@ -215,6 +224,7 @@ export default function Player() {
           `Queued ${result.queued.toLocaleString()} games — this runs in the ` +
             `background, so you can leave this page.`,
         );
+        setAnalyseQueued(true);
         // Start the poll immediately rather than waiting for the next tick, so
         // the progress bar appears on click rather than five seconds later.
         outstanding.current = result.queued;
@@ -355,6 +365,7 @@ export default function Player() {
           state={data.evaluation}
           games={games}
           busy={analysing}
+          queued={analyseQueued}
           note={analyseNote}
           error={analyseError}
           onAnalyse={() => void requestAnalysis()}
@@ -409,6 +420,7 @@ function Evaluation({
   state,
   games,
   busy,
+  queued,
   note,
   error,
   onAnalyse,
@@ -416,6 +428,8 @@ function Evaluation({
   state?: EvaluationState;
   games: Game[];
   busy: boolean;
+  /** A run this page started, or one the API reported as already in flight. */
+  queued: boolean;
   note: string | null;
   error: string | null;
   onAnalyse: () => void;
@@ -466,7 +480,13 @@ function Evaluation({
       : null;
 
   const { evaluated, outstanding, inScope, excluded, depth } = state;
-  const running = outstanding > 0;
+
+  // `outstanding` counts games without evals - which is every in-scope game
+  // for a player nobody has analysed yet. It says nothing about whether a run
+  // is *in flight*, and conflating the two disabled the button exactly when
+  // there was work to do. Only a request this page made (or one the API told
+  // us about via alreadyQueued) means the engine is actually working.
+  const running = queued && outstanding > 0;
   const done = inScope > 0 && outstanding === 0;
   const percent = inScope > 0 ? Math.round((evaluated / inScope) * 100) : 0;
 
@@ -526,10 +546,12 @@ function Evaluation({
             />
           </div>
 
-          {/* Not rendered mid-run: the curve would shift on every 5s poll,
-              and a chart that moves while you read it reads as broken. The
-              progress row below is the loading state. */}
-          {phases && !running && (
+          {/* Not rendered while evals are still landing: the curve would shift
+              on every 5s poll, and a chart that moves while you read it reads
+              as broken. Gated on `outstanding` rather than on `running` so it
+              also holds for a visitor who arrives mid-run without having
+              started it - they see the progress row, not a moving chart. */}
+          {phases && outstanding === 0 && (
             <PhaseChart
               means={phases.means}
               count={phases.count}
