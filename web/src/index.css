@@ -218,12 +218,14 @@ a:hover {
 /* The rating range is a pair, not a figure, so it is reliably ~30% wider than
    any other stat and would otherwise set the column width for all five. Given
    its own two columns it stays on one line while the rest stay compact. */
-.stats > :last-child {
+/* Scoped to the section's own stat row: the evaluation panel reuses .stats and
+   its last figure is an ordinary count that must not inherit double width. */
+section > .stats > :last-child {
   grid-column: span 2;
 }
 
 @media (max-width: 60rem) {
-  .stats > :last-child {
+  section > .stats > :last-child {
     grid-column: auto;
   }
 }
@@ -375,4 +377,57 @@ a:hover {
   --amplify-radii-small: var(--radius-sm);
   --amplify-radii-medium: var(--radius-md);
   --amplify-radii-large: var(--radius-lg);
+}
+
+/* --- Engine analysis ------------------------------------------------------
+   The second statistics group. Set apart from the counted stats above rather
+   than continuing them, because the split is the point: everything above needs
+   no engine and is shown to everyone, while this exists only for games that
+   were actually evaluated. */
+.evaluation {
+  padding-top: var(--sp-6);
+  border-top: 1px solid var(--border);
+  margin-bottom: var(--sp-8);
+}
+
+.evaluation-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--sp-4);
+  margin-bottom: var(--sp-4);
+}
+
+.evaluation-head h2 {
+  margin: 0;
+  font-size: var(--fs-h3);
+}
+
+/* No bottom border or margin here: inside the panel the stat row is followed
+   by the worst-games list, and a second rule would read as another section
+   boundary rather than as one group. */
+.evaluation .stats {
+  border-bottom: none;
+  padding-bottom: var(--sp-4);
+  margin-bottom: 0;
+}
+
+/* The point of the aggregate: not "your average is 72.8" but "look at these".
+   A short list rather than a table - five rows do not need column headings. */
+.worst {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2) var(--sp-4);
+  margin-bottom: var(--sp-6);
+}
+
+.worst-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
 }

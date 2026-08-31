@@ -23,10 +23,17 @@ export class ApiError extends Error {
   // syntax that emits runtime code. That is what lets the build strip types
   // rather than transform them.
   readonly status: number;
+  /**
+   * The parsed error body, when there was one. Carries fields a caller may
+   * need to act on rather than only display - `retryAfter` on a 429 from the
+   * analyse rate limit is the reason this exists.
+   */
+  readonly body: unknown;
 
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, body?: unknown) {
     super(message);
     this.status = status;
+    this.body = body;
   }
 }
 
@@ -46,7 +53,7 @@ async function parse(response: Response) {
       (body as { error?: string }).error ??
       (body as { message?: string }).message ??
       response.statusText;
-    throw new ApiError(response.status, error);
+    throw new ApiError(response.status, error, body);
   }
 
   return body;
@@ -159,6 +166,27 @@ export interface Game {
   /** Chess.com's raw time control, e.g. "180", "600+5", "1/259200". */
   tc: string;
   class: string;
+
+  // --- Evaluation, present only on games Stockfish has finished -------------
+  //
+  // The per-ply `evals` array and the PGN are deliberately NOT sent: the
+  // dashboard shows aggregates and worst-game ranking, and the move-by-move
+  // view is the thing this project decided not to build. Together they were
+  // 76% of a game row.
+
+  /** Average centipawn loss. The headline number for a single game. */
+  acpl?: number;
+  blunders?: number;
+  mistakes?: number;
+  inaccuracies?: number;
+  /** Ply index of the single worst move, and what it cost in centipawns. */
+  worstPly?: number;
+  worstLoss?: number;
+  /** Set on success and on an unparseable game - both mean "not retried". */
+  evalDepth?: number;
+  evaluatedAt?: number;
+  /** Present instead of the numbers when the PGN could not be parsed. */
+  evalError?: string;
 }
 
 /**
@@ -229,6 +257,50 @@ export async function submitPlayer(username: string): Promise<SubmitResponse> {
     body: JSON.stringify({ username, platform: "chesscom" }),
   });
   return (await parse(response)) as SubmitResponse;
+}
+
+/**
+ * The 202 from POST /analyse.
+ *
+ * `queued` is work started, `skipped` is games already evaluated at this depth
+ * (the dedup, which is what makes re-analysing free), `excluded` is games that
+ * will never be evaluated - daily, where centipawn loss measures the player's
+ * engine rather than their judgement.
+ *
+ * `alreadyQueued` appears instead of queued>0 when a run for this player is
+ * already in flight: the request is refused, and no rate-limit token is spent.
+ */
+export interface AnalyseResponse {
+  player: string;
+  queued: number;
+  skipped: number;
+  byClass: Record<string, number>;
+  excluded: Record<string, number>;
+  alreadyQueued?: number;
+  statusUrl: string;
+}
+
+/**
+ * Ask for a player's recent games to be evaluated. Authenticated, and the one
+ * call that spends real money.
+ *
+ * A 429 carries `retryAfter` seconds - the token bucket is per account, five
+ * tokens refilling one an hour, and it is charged only when a request actually
+ * queues work.
+ */
+export async function analysePlayer(
+  username: string,
+  platform = "chesscom",
+): Promise<AnalyseResponse> {
+  const response = await fetch(`${BASE}/analyse`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(await authHeader()),
+    },
+    body: JSON.stringify({ username, platform }),
+  });
+  return (await parse(response)) as AnalyseResponse;
 }
 
 /** Every player anyone has submitted. Public. */

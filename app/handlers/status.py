@@ -65,6 +65,31 @@ def _read_games(pk, archive):
     kwargs = {
         "KeyConditionExpression": Key("PK").eq(pk)
         & Key("SK").begins_with(f"GAME#{archive}#"),
+        # Everything the table renders, and nothing it does not. Two fields are
+        # deliberately absent:
+        #
+        #   pgn   - 1,946 of 2,544 bytes per game, 76% of the row, and the
+        #           browser never renders a move list. It exists so evaluation
+        #           need not re-fetch from Chess.com, which is a server-side
+        #           concern.
+        #   evals - the per-ply array. The summary (acpl, blunders, worstPly)
+        #           is what a dashboard shows; the plies belong to a
+        #           single-game view this project has deliberately not built,
+        #           because Lichess does that better.
+        #
+        # Measured before: one 62-game month was 196KB. A month of 1,900 games
+        # would have been ~4.8MB per request.
+        "ProjectionExpression": (
+            "#u, #e, colour, #r, rating, opp, oppRating, tc, #c, "
+            "acpl, blunders, mistakes, inaccuracies, worstPly, worstLoss, "
+            "evalDepth, evaluatedAt, evalError"
+        ),
+        "ExpressionAttributeNames": {
+            "#u": "url",
+            "#e": "end",
+            "#r": "result",
+            "#c": "class",
+        },
     }
     while True:
         page = table.query(**kwargs)

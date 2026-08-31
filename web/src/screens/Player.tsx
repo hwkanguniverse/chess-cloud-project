@@ -22,9 +22,11 @@ import { Link, useParams } from "react-router-dom";
 
 import {
   ApiError,
+  analysePlayer,
   getMonth,
   getPlayer,
   outcomeOf,
+  type EvaluationState,
   type Game,
   type PlayerResponse,
 } from "../api";
@@ -64,10 +66,21 @@ export default function Player() {
   const [loadingGames, setLoadingGames] = useState(false);
   const [gamesError, setGamesError] = useState<string | null>(null);
 
+  // The analyse request itself, kept apart from the evaluation *state* the
+  // player route reports. One is "did my click succeed", the other is "how far
+  // along is the engine" - conflating them makes a finished run look like a
+  // stuck button.
+  const [analysing, setAnalysing] = useState(false);
+  const [analyseNote, setAnalyseNote] = useState<string | null>(null);
+  const [analyseError, setAnalyseError] = useState<string | null>(null);
+
   // How far into the COMPLETE archives we have fetched. The list is
   // newest-first, so this walks backwards through the player's history.
   const cursor = useRef(0);
   const pending = useRef(0);
+  // Games queued for evaluation but not yet finished. Drives the poll the same
+  // way `pending` does for ingestion.
+  const outstanding = useRef(0);
   // Archives already fetched. Polling reorders nothing, but an archive
   // completing mid-scroll could otherwise be pulled twice.
   const fetched = useRef(new Set<string>());
@@ -77,6 +90,7 @@ export default function Player() {
       const response = await getPlayer(platform, username);
       setData(response);
       pending.current = response.pending;
+      outstanding.current = response.evaluation?.outstanding ?? 0;
       setError(null);
       return response.pending;
     } catch (err) {
@@ -100,7 +114,12 @@ export default function Player() {
     async function tick() {
       const remaining = await loadPlayer();
       if (cancelled) return;
-      if (remaining > 0) timer = window.setTimeout(tick, POLL_MS);
+      // Keep polling while EITHER ingestion or evaluation is still going. The
+      // two are independent - a player can be fully ingested and mid-analysis
+      // - so the poll has to outlive whichever finishes first.
+      if (remaining > 0 || outstanding.current > 0) {
+        timer = window.setTimeout(tick, POLL_MS);
+      }
     }
 
     tick();
@@ -168,6 +187,47 @@ export default function Player() {
       setLoadingGames(false);
     }
   }, [data, loadingGames, platform, username]);
+
+  const requestAnalysis = useCallback(async () => {
+    setAnalysing(true);
+    setAnalyseError(null);
+    setAnalyseNote(null);
+    try {
+      const result = await analysePlayer(username, platform);
+
+      if (result.alreadyQueued) {
+        // Not an error. Somebody - possibly this user in another tab - already
+        // started this player, and the request cost no rate-limit token.
+        setAnalyseNote(
+          `Already being analysed: ${result.alreadyQueued.toLocaleString()} games in progress.`,
+        );
+      } else if (result.queued > 0) {
+        setAnalyseNote(`Queued ${result.queued.toLocaleString()} games.`);
+        // Start the poll immediately rather than waiting for the next tick, so
+        // the progress bar appears on click rather than five seconds later.
+        outstanding.current = result.queued;
+        void loadPlayer();
+      } else {
+        setAnalyseNote("Everything already evaluated - nothing to do.");
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 429) {
+        // The bucket is per account and charged only for real work, so this
+        // means the user has genuinely started five new players in an hour.
+        const body = err.body as { retryAfter?: number } | undefined;
+        const mins = Math.ceil((body?.retryAfter ?? 3600) / 60);
+        setAnalyseError(
+          `Analysis limit reached. Try again in about ${mins} ${mins === 1 ? "minute" : "minutes"}.`,
+        );
+      } else if (err instanceof ApiError && err.status === 401) {
+        setAnalyseError("Sign in to analyse a player.");
+      } else {
+        setAnalyseError(err instanceof Error ? err.message : String(err));
+      }
+    } finally {
+      setAnalysing(false);
+    }
+  }, [loadPlayer, platform, username]);
 
   // First paint: fill one page. Runs once the archive list exists, and not
   // again - the guard is the cursor, not the effect deps.
@@ -269,6 +329,20 @@ export default function Player() {
         </div>
       )}
 
+      {/* The second statistics group. Everything above needs no engine and is
+          shown to everyone; this appears only once games have been evaluated,
+          which is the split the whole phase rests on. */}
+      {!loading && (
+        <Evaluation
+          state={data.evaluation}
+          games={games}
+          busy={analysing}
+          note={analyseNote}
+          error={analyseError}
+          onAnalyse={() => void requestAnalysis()}
+        />
+      )}
+
       {failed > 0 && (
         <p className="notice warn">
           Chess.com could not return {failed}{" "}
@@ -299,8 +373,176 @@ export default function Player() {
   );
 }
 
+/**
+ * Evaluation: the engine's half of the page.
+ *
+ * Deliberately not a chart. The file's standing decision is that the dashboard
+ * is the product and the single-game report is not - Lichess does that better
+ * - so this answers "how well does this player actually play, and which games
+ * went worst", and stops there.
+ *
+ * `inScope` rather than the player's total game count is the denominator
+ * everywhere here: evaluation is capped at 100 per time control and excludes
+ * daily, so 201 of 1,502 games is complete, not 13%.
+ */
+function Evaluation({
+  state,
+  games,
+  busy,
+  note,
+  error,
+  onAnalyse,
+}: {
+  state?: EvaluationState;
+  games: Game[];
+  busy: boolean;
+  note: string | null;
+  error: string | null;
+  onAnalyse: () => void;
+}) {
+  if (!state) return null;
+
+  // Aggregated over the games in hand rather than fetched: the numbers are
+  // per-game on rows the list already holds, so a separate call would be a
+  // second source of truth for arithmetic the client can do.
+  const rated = games.filter((g) => g.acpl != null && g.evalError == null);
+  const summary =
+    rated.length > 0
+      ? {
+          n: rated.length,
+          acpl: rated.reduce((t, g) => t + (g.acpl ?? 0), 0) / rated.length,
+          blunders: rated.reduce((t, g) => t + (g.blunders ?? 0), 0),
+          mistakes: rated.reduce((t, g) => t + (g.mistakes ?? 0), 0),
+          inaccuracies: rated.reduce((t, g) => t + (g.inaccuracies ?? 0), 0),
+          // The five that went worst. This is the thing a player actually
+          // wants from an aggregate: not "your average is 72.8" but "look at
+          // these".
+          worst: [...rated]
+            .sort((a, b) => (b.acpl ?? 0) - (a.acpl ?? 0))
+            .slice(0, 5),
+        }
+      : null;
+
+  const { evaluated, outstanding, inScope, excluded, depth } = state;
+  const running = outstanding > 0;
+  const done = inScope > 0 && outstanding === 0;
+  const percent = inScope > 0 ? Math.round((evaluated / inScope) * 100) : 0;
+
+  const excludedTotal = Object.values(excluded ?? {}).reduce((a, b) => a + b, 0);
+
+  return (
+    <section className="evaluation">
+      <div className="evaluation-head">
+        <h2>Engine analysis</h2>
+        {done ? (
+          <span className="muted small">
+            {evaluated.toLocaleString()} games at depth {depth}
+          </span>
+        ) : (
+          <Button variant="primary" onClick={onAnalyse} disabled={busy || running}>
+            {busy
+              ? "Requesting…"
+              : running
+                ? "Analysing…"
+                : evaluated > 0
+                  ? `Analyse ${outstanding.toLocaleString()} new games`
+                  : `Analyse ${inScope.toLocaleString()} games`}
+          </Button>
+        )}
+      </div>
+
+      {error && <p className="notice warn">{error}</p>}
+      {note && !error && <p className="muted small">{note}</p>}
+
+      {/* The headline numbers, over the games actually loaded into the list.
+          Stated as "of N loaded" rather than presented as the player's career
+          average, because the list is paginated - claiming otherwise would be
+          the same mistake as showing a win rate over 3 of 230 months. */}
+      {summary && (
+        <>
+          <div className="stats">
+            <Stat
+              label="Avg centipawn loss"
+              value={summary.acpl.toFixed(1)}
+              sub={`over ${summary.n.toLocaleString()} evaluated ${summary.n === 1 ? "game" : "games"} loaded`}
+            />
+            <Stat
+              label="Blunders"
+              value={summary.blunders.toLocaleString()}
+              tone="loss"
+              sub={`${(summary.blunders / summary.n).toFixed(2)} per game`}
+            />
+            <Stat
+              label="Mistakes"
+              value={summary.mistakes.toLocaleString()}
+              sub={`${(summary.mistakes / summary.n).toFixed(2)} per game`}
+            />
+            <Stat
+              label="Inaccuracies"
+              value={summary.inaccuracies.toLocaleString()}
+              sub={`${(summary.inaccuracies / summary.n).toFixed(2)} per game`}
+            />
+          </div>
+
+          {summary.worst.length > 0 && (
+            <div className="worst">
+              <span className="label">Worst games</span>
+              <ul className="worst-list">
+                {summary.worst.map((g) => (
+                  <li key={g.url}>
+                    <a href={g.url} target="_blank" rel="noreferrer">
+                      vs {g.opp}
+                    </a>
+                    <span className="muted small">
+                      {" "}
+                      · {g.acpl?.toFixed(0)} cp avg loss
+                      {g.blunders ? ` · ${g.blunders} blunders` : ""}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </>
+      )}
+
+      {running && (
+        <div className="progress-row">
+          <span className="label">Evaluating</span>
+          <span className="bar">
+            <ProgressBar value={percent} height={8} />
+          </span>
+          <span className="muted small">
+            {evaluated.toLocaleString()} / {inScope.toLocaleString()}
+          </span>
+        </div>
+      )}
+
+      {/* Games that will never be evaluated are stated rather than left as an
+          unexplained gap between the game count and the evaluated count. */}
+      {excludedTotal > 0 && (
+        <p className="muted small">
+          {Object.entries(excluded)
+            .map(([name, n]) => `${n.toLocaleString()} ${name}`)
+            .join(", ")}{" "}
+          not evaluated — an engine and a database are legal there, so
+          centipawn loss would measure the tools rather than the player.
+        </p>
+      )}
+
+      {inScope === 0 && (
+        <p className="muted small">
+          No games in scope for evaluation.
+        </p>
+      )}
+    </section>
+  );
+}
+
 function GamesTable({ games }: { games: Game[] }) {
   if (games.length === 0) return null;
+
+  const anyEvaluated = games.some((g) => g.acpl != null || g.evalError != null);
 
   return (
     <table className="table">
@@ -313,6 +555,11 @@ function GamesTable({ games }: { games: Game[] }) {
           <th>Result</th>
           <th></th>
           <th>Time</th>
+          {/* Only rendered when at least one loaded game has been evaluated,
+              so an un-analysed player does not get two permanently empty
+              columns explaining nothing. */}
+          {anyEvaluated && <th className="num">Avg loss</th>}
+          {anyEvaluated && <th className="num">Blunders</th>}
           <th></th>
         </tr>
       </thead>
@@ -336,6 +583,26 @@ function GamesTable({ games }: { games: Game[] }) {
                 "checkmated". The pill says who won; this says how. */}
             <td className="muted small">{game.result}</td>
             <td className="muted small">{game.class}</td>
+            {anyEvaluated && (
+              <td className="num mono" title={
+                game.evalError
+                  ? "This game's PGN could not be parsed"
+                  : game.worstPly != null
+                    ? `Worst move at ply ${game.worstPly}, costing ${game.worstLoss} cp`
+                    : undefined
+              }>
+                {game.evalError
+                  ? "—"
+                  : game.acpl != null
+                    ? game.acpl.toFixed(0)
+                    : ""}
+              </td>
+            )}
+            {anyEvaluated && (
+              <td className="num mono">
+                {game.evalError ? "—" : (game.blunders ?? "")}
+              </td>
+            )}
             <td>
               <a href={game.url} target="_blank" rel="noreferrer">
                 view
