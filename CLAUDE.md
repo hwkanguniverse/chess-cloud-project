@@ -95,6 +95,8 @@ Measured: PGNs are **3,151 B mean**, max 8,872 B — a game item goes from 138 B
 
 **Concurrency buys latency, not cost** — Fargate bills per vCPU-second. At depth 18 (55.6 sec/game at 1 vCPU) with the last-100-per-control cap:
 
+*(Figures below are the pre-measurement estimates that justified scaling. Both numbers moved afterwards: games are **31.4 s not 55.6 s**, and daily is no longer evaluated. Current figures are in the cost table under Infrastructure.)*
+
 | | Games | 1 worker | 10 workers | Cost |
 |---|---|---|---|---|
 | theohwk | 227 | 3.5 hr | 21 min | $0.053 |
@@ -126,6 +128,8 @@ The reasoning behind depth 8 — "a blunder is a large eval swing and does not n
 | theohwk | 227 | $0.053 |
 | **Worst case** (4 controls × 100) | 400 | **$0.093** |
 
+*(Superseded: worst case is now 3 controls × 100 = 300 games at **$0.043**, daily having been cut and the per-game rate measured. The reasoning for bounding games rather than depth is unchanged, which is why this table stays.)*
+
 **Per time control, not overall**, because a player's last 100 games overall can be entirely one control — theohwk's would be nearly all rapid, hiding 437 blitz games. 4× the cost of last-100-overall and worth it.
 
 **danielnaroditsky stops being expensive.** 129,391 games becomes 318, the same as everyone else. The outlier problem this phase kept running into simply disappears.
@@ -150,13 +154,13 @@ Three things bound it together:
 
 ### Bounding the work
 
-- [x] **Select the last 100 games per time control** for a player, newest first, and evaluate only those. Selection lives in the analyse Lambda rather than the worker — it is a question about the table, and answering it once at the front door beats every worker re-deriving it. Proven on theohwk: 227 games selected as 100 blitz, 100 rapid, 26 daily, 1 bullet.
-- [x] **Skip games that already have evals.** This is what makes re-submission free, and it must be **per game, not per player**: a player analysed last month has 100 evaluated games, but their newest 100 now includes games played since. Per-player skipping would never pick up new games; per-game re-evaluates only the delta, typically a handful. The same insight as the ETag, one layer down. Filtered on `evalDepth == DEPTH` at selection, and again in the worker so a duplicate SQS delivery costs a `GetItem` rather than 45 seconds of engine.
+- [x] **Select the last 100 games per time control** for a player, newest first, and evaluate only those. Selection lives in the analyse Lambda rather than the worker — it is a question about the table, and answering it once at the front door beats every worker re-deriving it. Proven on theohwk: **201 games** selected as 100 blitz, 100 rapid, 1 bullet — the 26 daily games are excluded before the cap applies, so dropping them does not free a slot for another control. *(The original run selected 227 including daily; the cut is recorded in the decision log.)*
+- [x] **Skip games that already have evals.** This is what makes re-submission free, and it must be **per game, not per player**: a player analysed last month has 100 evaluated games, but their newest 100 now includes games played since. Per-player skipping would never pick up new games; per-game re-evaluates only the delta, typically a handful. The same insight as the ETag, one layer down. Filtered on `evalDepth == DEPTH` at selection, and again in the worker so a duplicate SQS delivery costs a `GetItem` rather than 45 seconds of engine — **true only once the first pass has finished**, which is what the in-flight claim below exists to cover.
 - [x] **Rate limit on analyse** — a **token bucket per account**: 5 tokens, refilling one per hour. Replaces verification entirely and settles the debt to [PHASE-F.md](PHASE-F.md) — one control, two purposes.
 
   **Charged per distinct new player, not per request.** The bucket is debited *after* selection and only when `todo` is non-empty, so re-submitting an analysed player queues nothing and costs no quota. That is not a nicety: if free requests burned tokens, the dedup would stop being free and the case for cutting verification would collapse with it.
 
-  **A bucket rather than a flat 1/hour**, because the product is comparing players — one per hour makes looking at yourself and two friends a three-hour job. Bursting five keeps first use normal while sustained use still converges to one per hour, ~$1.37/day at the measured $0.057 worst case.
+  **A bucket rather than a flat 1/hour**, because the product is comparing players — one per hour makes looking at yourself and two friends a three-hour job. Bursting five keeps first use normal while sustained use still converges to one per hour, ~$1.03/day at the measured $0.043 worst case.
 
   **One conditional `UpdateItem`, not read-then-write.** The condition carries the decision, so a failed condition *is* the rejection. Read-then-write is a race two parallel requests win together — the exact bug a rate limit exists to prevent. Drilled: two requests reading the same state, exactly one wins, tokens never go negative. Refill is computed from `updatedAt` rather than scheduled, advancing by whole periods so a partial hour is neither refilled nor rounded away, and the row is swept by the same TTL the OAuth flow uses.
 
@@ -169,8 +173,8 @@ Three things bound it together:
 
 - [x] **Stockfish in the image.** One `apt-get install stockfish` layer, plus `chess` for PGN parsing and UCI. **One image serves both workers** — the task definition picks which by overriding the command — because they share the table, the row shape and most of their operational story. GPL-3 is satisfied: the binary is unmodified Debian, distributed to nobody, and reached only over HTTP.
 - [x] **One engine process, reused.** A module-level `_engine()` started on first use and kept for the task's life, not per message — starting Stockfish and loading NNUE weights is a real share of a 45-second job. This is the skill's stated reason for Fargate over Lambda, so throwing it away would have removed the justification for the platform.
-- [x] **Depth settled at 18** — measured, not assumed. See the settled section above for the recall numbers that ruled out 8 and 12. 55.6 sec/game at 1 vCPU.
-- [x] **Separate route** — `POST /analyse`, against an already-ingested player. 404 if nothing is stored, so a request for impossible work fails at the front door rather than as messages that reach the DLQ looking like a real fault. Returns 202 with `queued`, `skipped` and `byClass`, because a saving that is not reported is only claimed.
+- [x] **Depth settled at 18** — measured, not assumed. See the settled section above for the recall numbers that ruled out 8 and 12. **31.4 s/game at 1 vCPU**, measured — not the 55.6 s originally assumed.
+- [x] **Separate route** — `POST /analyse`, against an already-ingested player. 404 if nothing is stored, so a request for impossible work fails at the front door rather than as messages that reach the DLQ looking like a real fault. Returns 202 with `queued`, `skipped`, `byClass`, `excluded` and — when a run is already in flight — `alreadyQueued`, because a saving that is not reported is only claimed.
 - [x] **Ingestion stores the PGN** on the game item, via `summarise_game()`. Measured at 3,151 B mean against a 400 KB limit.
 
 ### Infrastructure
@@ -181,12 +185,14 @@ Three things bound it together:
 
 | | Games | Cost | 1 task | 8 tasks |
 |---|---|---|---|---|
-| theohwk | 227 | $0.033 | 2.0 hr | **18 min** |
-| danielnaroditsky | 318 | $0.046 | 2.8 hr | 25 min |
-| erik | 361 | $0.052 | 3.2 hr | 28 min |
-| **Worst case** (4 × 100) | 400 | **$0.057** | 3.5 hr | 31 min |
+| **theohwk** *(measured 31 Aug)* | **201** | **$0.029** | 1.8 hr | **13.9 min** |
+| danielnaroditsky | ~292 | $0.042 | 2.5 hr | 20 min |
+| erik | ~335 | $0.048 | 2.9 hr | 23 min |
+| **Worst case** (3 × 100) | 300 | **$0.043** | 2.6 hr | 21 min |
 
-Every latency and cost figure elsewhere in this file is therefore **conservative by ~44%**, and the 10,000-player abuse ceiling drops from $930 to **~$572**.
+theohwk's row is no longer an estimate: **201 games in 13.9 min on 8 tasks**, end to end. The others are scaled by the same measured rate, with daily removed from their counts and the 6% overhead theohwk's run showed over the theoretical 8-task figure — SQS polling and batch tail, not throttling.
+
+**Worst case is now 3 controls, not 4** — daily is not evaluated — so the ceiling falls from $0.057 to **$0.043 per player**, and the 10,000-player abuse ceiling from ~$572 to **~$430**. Every latency and cost figure elsewhere in this file that still assumes 55.6 s/game is **conservative by ~44%**.
 
 ### The existing data
 
@@ -211,12 +217,13 @@ Stated because the temptation to revisit them will be strongest here.
 
 Same standard as every prior phase: watched live, not asserted.
 
-- [x] **A game the engine cannot parse** → does not fail the whole month. **Drilled itself**: one of theohwk's 227 games was unparseable. It was marked `evalError` with `evalDepth` set — marked rather than merely skipped, so it is not re-attempted on every future analyse — and the other 226 completed. The batch was unaffected.
+- [x] **A game the engine cannot parse** → does not fail the whole month. **Drilled itself**: one of theohwk's 227 games was unparseable. It was marked `evalError` with `evalDepth` set — marked rather than merely skipped, so it is not re-attempted on every future analyse — and the other 226 completed. The batch was unaffected. *(The 31 Aug re-run hit no unparseable game across its 201, and no game in the table carries `evalError` today. Whether the original bad game was daily — and so now excluded — or simply outside the current 201 is **not established**: the wipe removed the marking, so this is unproven either way rather than fixed.)*
 - [x] **Engine crash or hang mid-game** → the message returns to the queue, nothing half-written. **Drilled 27 Aug 2026** by `stop-task` on a working evaluator with 24 games in flight. SIGTERM → `done` on the game in hand **4 seconds later** → `exiting cleanly`; the rest of that task's batch stayed invisible and was redelivered. ECS replaced the task (7→8), and **24/24 games finished with an empty DLQ**.
 - [x] **A job that times out** — solved by shrinking the job rather than growing the timeout. One message per game took the visibility timeout from **7 hours to 5 minutes** against ~45 seconds of work. A per-player message would have needed a timeout longer than most drills.
 - [x] **Re-submitting an evaluated month** → the ETag still short-circuits and nothing is re-evaluated. Same drill as the ETag row above.
 - [x] **Crash mid-evaluation** → recovery does not double-count. **Drilled** by redriving the eval DLQ: all 10 messages logged `already evaluated` and were deleted without re-running the engine. `acpl` and `blunders` were unchanged and **`evaluatedAt` still held the original timestamps** — the guard short-circuits before any write, so redelivery costs one `GetItem`.
-- [x] ~~**An unverified user submitting two analyses**~~ → **moot.** Verification was cut, so there is no unverified state to drill. The replacement control is the rate limit, still owed above.
+- [x] **Two analyses of the same player at once** → **drilled by accident, and it failed.** A second `POST /analyse` 30 seconds into theohwk's run re-queued all 201 games and spent a second token, because selection filters on `evalDepth` and an in-flight game is not stamped until the engine finishes it. **402 messages for 201 games; 166 duplicates absorbed for a `GetItem` each, but 17 games evaluated twice.** Idempotency held — identical values overwritten, nothing doubled — so the cost was ~9 min of vCPU, ~$0.002. Fixed by the per-player claim; **the fix itself is deployed but not yet drilled live**, because theohwk is now fully evaluated and never reaches the claim.
+- [x] ~~**An unverified user submitting two analyses**~~ → **moot.** Verification was cut, so there is no unverified state to drill. The replacement control is the rate limit, **now built** — a token bucket per account, plus the in-flight claim that keeps a duplicate request free.
 - [x] **A month that exceeds the item limit** → **no equivalent cliff.** The worst real game is 8,872 B of PGN plus ~500 plies of evals — comfortably inside 400 KB, and a game cannot grow without bound the way a month could. The month item now holds counts only, so the thing that was at 95% is at 0.5 RCUs.
 
 ## Cost controls
