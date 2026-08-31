@@ -433,10 +433,20 @@ section > .stats > :last-child {
 }
 
 /* --- Where the mistakes happen -------------------------------------------
-   The app's only chart. Ten buckets across the course of a game, so the x axis
-   is a proportion rather than a move number - see PhaseChart for why that
-   choice is what makes it honest. */
+   The app's only chart, rendered by Recharts. Ten buckets across the course of
+   a game, so the x axis is a proportion rather than a move number - see
+   PhaseChart for why that choice is what makes it honest.
+
+   Recharts owns the plot's internal layout (axis gutter, gridlines, hover),
+   so what is left here is the frame around it and the tooltip card. Colours
+   are passed to Recharts as var() strings rather than set here, because they
+   land on SVG attributes rather than CSS properties. */
 .phases {
+  /* Matches the YAxis width passed to Recharts, so the phase labels below line
+     up with the plot area rather than with the container. */
+  --phase-gutter: 36px;
+
+  margin-top: var(--sp-3);
   margin-bottom: var(--sp-6);
 }
 
@@ -448,57 +458,29 @@ section > .stats > :last-child {
   gap: var(--sp-2) var(--sp-4);
 }
 
-/* A fixed gutter for the y labels, then the plot. Everything below the plot
-   (the hover strip, the phase labels) uses the same gutter so the columns line
-   up with the curve rather than with the container. */
-.phases {
-  --phase-gutter: 2.5rem;
-}
-
 .phase-plot {
-  display: grid;
-  grid-template-columns: var(--phase-gutter) 1fr;
-  margin-top: var(--sp-3);
+  margin-top: var(--sp-2);
 }
 
-/* Labels sit at the gridlines: first and last align to the top and bottom of
-   the plot, the rest space evenly between. space-between over a box the exact
-   height of the plot does that without any per-tick arithmetic. */
-.phase-y {
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  align-items: flex-end;
-  height: 96px;
-  padding-right: var(--sp-2);
+/* Recharts renders its own focus outline on the wrapper; the chart is not
+   interactive beyond hover, so it is noise. */
+.phase-plot .recharts-wrapper:focus,
+.phase-plot .recharts-surface:focus {
+  outline: none;
+}
+
+.phase-tip {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  padding: var(--sp-2) var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+}
+
+.phase-tip strong {
   font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  color: var(--text-faint);
-  /* Centre each label on its line rather than hanging below it. */
-  margin: -0.5em 0;
-}
-
-.phase-chart {
-  display: block;
-  width: 100%;
-  /* Fixed height with preserveAspectRatio="none": the shape of the curve is
-     the message, and letting it scale with viewport width would flatten it on
-     a wide screen and exaggerate it on a narrow one. */
-  height: 96px;
-  overflow: visible;
-}
-
-/* Sits directly under the plot and shares its geometry, so each invisible cell
-   lines up with the bucket above it and carries that bucket's tooltip. */
-.phase-ticks {
-  display: grid;
-  grid-template-columns: repeat(10, 1fr);
-  height: var(--sp-4);
-  margin: calc(var(--sp-4) * -1) 0 0 var(--phase-gutter);
-}
-
-.phase-ticks > span {
-  cursor: help;
 }
 
 /* Three equal thirds, each label centred in its own. Evenly spaced and
@@ -510,6 +492,7 @@ section > .stats > :last-child {
   text-align: center;
   margin-left: var(--phase-gutter);
   padding-top: var(--sp-2);
+  border-top: 1px solid var(--border);
   font-size: var(--fs-xs);
   color: var(--text-muted);
   text-transform: uppercase;

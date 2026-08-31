@@ -19,6 +19,15 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 
 import {
   ApiError,
@@ -588,8 +597,11 @@ function Evaluation({
  * Where an opening ends is a judgement this code does not have to make, and
  * the reader can group the curve by eye.
  *
- * Inline SVG rather than a charting library: ten points do not justify a
- * dependency, and this is the only drawing in the app.
+ * Recharts rather than hand-rolled SVG. The hand-rolled version worked, but
+ * its tooltips were invisible spans in an overlay grid faking a hover target,
+ * and every further axis feature was more geometry written by hand. Colours
+ * stay on the design system: Recharts passes `var(--loss)` straight through to
+ * SVG attributes, so nothing here hard-codes a hex.
  */
 function PhaseChart({
   means,
@@ -600,37 +612,28 @@ function PhaseChart({
   count: number[];
   games: number;
 }) {
-  const points = means
-    .map((m, i) => ({ m, i }))
-    .filter((p): p is { m: number; i: number } => p.m != null);
-  if (points.length < 3) return null;
-
-  // Geometry in an arbitrary viewBox, scaled by CSS. The axis starts at zero
-  // because centipawn loss is a magnitude - a truncated axis would exaggerate
-  // the rise, which is the whole thing the chart is claiming.
-  const W = 320;
-  const H = 96;
+  const data = means
+    .map((m, i) => ({
+      // Mid-point of the bucket, so a point sits in the middle of the tenth of
+      // the game it describes rather than on its edge.
+      pct: (i + 0.5) * (100 / means.length),
+      cp: m,
+      moves: count[i],
+    }))
+    .filter((d): d is { pct: number; cp: number; moves: number } => d.cp != null);
+  if (data.length < 3) return null;
 
   // Round the top up to a clean number so the axis reads 0/50/100 rather than
   // 0/54.6/109.2. Ticks a reader cannot say out loud are not worth drawing.
   //
-  // The step is chosen from the *rounded* top rather than the raw peak, and the
-  // top is the next round number above the peak rather than above peak x 1.1.
-  // Padding first and rounding second compounds: a peak of 94.9 became a top of
-  // 125, squashing the curve into three-quarters of the plot for no reason.
-  const peak = Math.max(...points.map((p) => p.m));
+  // Padding and rounding must happen in one step, not two: rounding peak x 1.1
+  // up to the next step compounds, and turned a peak of 94.9 into a top of 125,
+  // squashing the curve into three-quarters of the plot.
+  const peak = Math.max(...data.map((d) => d.cp));
   const step = peak <= 40 ? 10 : peak <= 100 ? 25 : peak <= 200 ? 50 : 100;
   const top = Math.max(step, Math.ceil(peak / step) * step);
   const ticks: number[] = [];
   for (let v = 0; v <= top; v += step) ticks.push(v);
-
-  const x = (i: number) => (i / (means.length - 1)) * W;
-  const y = (m: number) => H - (m / top) * H;
-
-  const line = points.map((p) => `${x(p.i)},${y(p.m)}`).join(" ");
-  const area = `${x(points[0].i)},${H} ${line} ${x(points[points.length - 1].i)},${H}`;
-
-  const worst = points.reduce((a, b) => (b.m > a.m ? b : a));
 
   return (
     <div className="phases">
@@ -645,72 +648,48 @@ function PhaseChart({
       </div>
 
       <div className="phase-plot">
-        {/* Labels live in HTML, not in the SVG: preserveAspectRatio="none"
-            stretches the viewBox horizontally to fill the column, which would
-            smear any text drawn inside it. */}
-        <div className="phase-y" aria-hidden="true">
-          {[...ticks].reverse().map((v) => (
-            <span key={v}>{v}</span>
-          ))}
-        </div>
-
-        <svg
-          className="phase-chart"
-          viewBox={`0 0 ${W} ${H}`}
-          preserveAspectRatio="none"
-          role="img"
-          aria-label={
-            `Average centipawn loss per move across the game, on a scale of 0 ` +
-            `to ${top}. Lower is better. Rises from ` +
-            `${Math.round(points[0].m)} in the opening to a worst of ` +
-            `${Math.round(worst.m)}.`
-          }
-        >
-          {/* Gridlines at the labelled values, so a reader can measure the
-              curve rather than only see its shape. The zero line doubles as
-              the axis. */}
-          {ticks.map((v) => (
-            <line
-              key={v}
-              x1="0"
-              x2={W}
-              y1={y(v)}
-              y2={y(v)}
-              stroke={v === 0 ? "var(--border-strong)" : "var(--border)"}
-              strokeWidth="1"
-              vectorEffect="non-scaling-stroke"
+        <ResponsiveContainer width="100%" height={128}>
+          <AreaChart
+            data={data}
+            margin={{ top: 4, right: 4, bottom: 0, left: 0 }}
+          >
+            <CartesianGrid stroke="var(--border)" vertical={false} />
+            {/* Numeric and explicitly 0-100, so points land at their true
+                position in the game rather than at even spacing - a bucket
+                with no moves must leave a gap, not close it up. */}
+            <XAxis type="number" dataKey="pct" domain={[0, 100]} hide />
+            {/* Zero-based deliberately: centipawn loss is a magnitude, and a
+                truncated axis would exaggerate the rise the chart claims. */}
+            <YAxis
+              domain={[0, top]}
+              ticks={ticks}
+              width={36}
+              axisLine={false}
+              tickLine={false}
+              tick={{
+                fill: "var(--text-faint)",
+                fontFamily: "var(--font-mono)",
+                fontSize: 11,
+              }}
             />
-          ))}
-          <polygon points={area} fill="var(--loss-soft)" />
-          <polyline
-            points={line}
-            fill="none"
-            stroke="var(--loss)"
-            strokeWidth="2"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-            vectorEffect="non-scaling-stroke"
-          />
-          {/* The single worst bucket, marked - the chart's one claim. */}
-          <circle cx={x(worst.i)} cy={y(worst.m)} r="3" fill="var(--loss)"
-            vectorEffect="non-scaling-stroke" />
-        </svg>
-      </div>
-
-      {/* Hover gives the number and how many moves it rests on, so a point
-          computed from a handful of moves is not read as confidently as one
-          from hundreds. */}
-      <div className="phase-ticks" aria-hidden="true">
-        {means.map((m, i) => (
-          <span
-            key={i}
-            title={
-              m == null
-                ? "no moves in this part of the game"
-                : `${Math.round(m)} cp average loss, over ${count[i].toLocaleString()} moves`
-            }
-          />
-        ))}
+            <Tooltip
+              cursor={{ stroke: "var(--border-strong)", strokeWidth: 1 }}
+              content={<PhaseTooltip />}
+            />
+            <Area
+              type="monotone"
+              dataKey="cp"
+              stroke="var(--loss)"
+              strokeWidth={2}
+              fill="var(--loss-soft)"
+              // Real hover targets, replacing the invisible-span overlay the
+              // hand-rolled version needed.
+              dot={{ r: 2, fill: "var(--loss)", strokeWidth: 0 }}
+              activeDot={{ r: 4, fill: "var(--loss)", strokeWidth: 0 }}
+              isAnimationActive={false}
+            />
+          </AreaChart>
+        </ResponsiveContainer>
       </div>
 
       <div className="phase-axis">
@@ -719,10 +698,10 @@ function PhaseChart({
         <span>Endgame</span>
       </div>
 
-      {/* The axis now carries the numbers, so all that is left to say is the
-          thing the aggregate genuinely hides: measured on theohwk, short games
-          get much worse late (28 to 121 cp) while long games peak in the
-          middle and recover. A game that ends early often ends *because* of a
+      {/* The axis carries the numbers, so all that is left to say is the thing
+          the aggregate genuinely hides: measured on theohwk, short games get
+          much worse late (28 to 121 cp) while long games peak in the middle
+          and recover. A game that ends early often ends *because* of a
           blunder, so "worse later" is partly a tautology. */}
       <p className="muted small">
         Over {games.toLocaleString()} evaluated{" "}
@@ -733,6 +712,32 @@ function PhaseChart({
     </div>
   );
 }
+
+/**
+ * The hover card. Says how many moves the average rests on, so a point
+ * computed from a handful is not read as confidently as one from hundreds.
+ */
+function PhaseTooltip({
+  active,
+  payload,
+}: {
+  active?: boolean;
+  payload?: { payload: { pct: number; cp: number; moves: number } }[];
+}) {
+  if (!active || !payload?.length) return null;
+  const { pct, cp, moves } = payload[0].payload;
+  return (
+    <div className="phase-tip">
+      <strong>{Math.round(cp)} cp</strong> average loss
+      <br />
+      <span className="muted">
+        {Math.round(pct - 5)}–{Math.round(pct + 5)}% through the game ·{" "}
+        {moves.toLocaleString()} moves
+      </span>
+    </div>
+  );
+}
+
 
 function GamesTable({ games }: { games: Game[] }) {
   if (games.length === 0) return null;
