@@ -91,9 +91,10 @@ DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
 # first use normal while bounding sustained use to the same rate a flat 1/hour
 # would.
 #
-# **This bounds an account, and accounts are free.** See the note in CLAUDE.md
-# - the real backstop is the budget alarm, and closing the registration hole
-# is future work rather than something this control claims to do.
+# **This bounds an account, and accounts are free.** See the registration note
+# in PHASE-E.md - the real backstop is the budget alarm, and closing the
+# registration hole is future work rather than something this control claims
+# to do.
 RATE_BURST = int(os.environ.get("ANALYSE_RATE_BURST", "5"))
 RATE_REFILL_SECONDS = int(os.environ.get("ANALYSE_RATE_REFILL_SECONDS", "3600"))
 

@@ -190,7 +190,7 @@ variable "analyse_rate_refill_seconds" {
     determined account at ~$1.37/day.
 
     This bounds an *account*, and accounts are free - see the registration note
-    in CLAUDE.md. The budget alarm remains the real backstop.
+    in PHASE-E.md. The budget alarm remains the real backstop.
   EOT
   type        = number
   default     = 3600

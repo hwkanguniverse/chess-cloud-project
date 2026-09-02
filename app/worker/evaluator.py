@@ -26,7 +26,7 @@ Why bounded rather than everything: at depth 18 a game is ~56 seconds of one
 vCPU. A player with 129,391 games would be months of compute; capped at 100
 per control it is 318 games. Bounding the *games* is what makes full depth
 affordable - bounding the depth instead was measured and does not work, see
-CLAUDE.md.
+PHASE-E.md.
 """
 
 import io
