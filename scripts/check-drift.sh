@@ -83,6 +83,71 @@ else
   done
 fi
 
+# --- Phase 6: the network ---------------------------------------------------
+#
+# The justification for building a VPC at all was that the default one is
+# undeclared state nothing can assert on. Building it and then not asserting
+# anything would move that gap rather than close it, so these checks are the
+# point of the phase rather than an addition to it.
+
+# The security group's *absence* of ingress rules is the control that made
+# private subnets unnecessary - nothing routes to a queue consumer, so with no
+# inbound rule a public subnet is irrelevant to exposure. That argument holds
+# only while the rule count stays zero, and a single console click would end
+# it silently. This is the one check here that guards a security property
+# rather than a cost.
+echo "Task security group (no inbound - what makes public subnets safe):"
+SG=$(aws ec2 describe-security-groups --region "$REGION"   --filters Name=group-name,Values=chess-cloud-tasks   --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+if [ -z "$SG" ] || [ "$SG" = "None" ]; then
+  flag "chess-cloud-tasks security group is missing"
+else
+  INGRESS=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$SG"     --query 'length(SecurityGroups[0].IpPermissions)' --output text 2>/dev/null)
+  if [ "$INGRESS" = "0" ]; then
+    ok "no inbound rules"
+  else
+    flag "$INGRESS inbound rule(s) - the no-ingress argument for public subnets no longer holds"
+  fi
+fi
+
+# Both services must be in the purpose-built VPC. The failure mode is not
+# hypothetical: a service reverting to the default VPC's subnets would keep
+# working perfectly, since that is where it ran until Phase 6 - so nothing
+# would surface it except this check.
+echo "Fargate tasks in the purpose-built VPC (not the default):"
+VPC=$(aws ec2 describe-vpcs --region "$REGION"   --filters Name=tag:Name,Values=chess-cloud   --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+if [ -z "$VPC" ] || [ "$VPC" = "None" ]; then
+  flag "the chess-cloud VPC is missing"
+else
+  WANT=$(aws ec2 describe-subnets --region "$REGION"     --filters Name=vpc-id,Values="$VPC"     --query 'sort_by(Subnets,&SubnetId)[].SubnetId' --output text 2>/dev/null)
+  for S in worker evaluator; do
+    GOT=$(aws ecs describe-services --cluster chess-cloud --services "$S" --region "$REGION"       --query 'sort_by(services[0].networkConfiguration.awsvpcConfiguration.subnets,&@)'       --output text 2>/dev/null)
+    if [ -z "$GOT" ] || [ "$GOT" = "None" ]; then
+      ok "$S not deployed yet"
+    elif [ "$GOT" = "$WANT" ]; then
+      ok "$S in $VPC"
+    else
+      flag "$S is not in the chess-cloud VPC's subnets - check it has not reverted to the default VPC"
+    fi
+  done
+fi
+
+# Free, and on the task-start path. The DynamoDB endpoint keeps table traffic
+# off the public internet; the S3 one is what ECR pulls image layers through,
+# so losing it is a task-start failure rather than a cosmetic one. Both are
+# $0, which means nothing pressures them to exist - the usual reason a free
+# thing quietly disappears.
+echo "Gateway endpoints (free, and S3 is on the ECR image-pull path):"
+if [ -n "$VPC" ] && [ "$VPC" != "None" ]; then
+  for SVC in dynamodb s3; do
+    N=$(aws ec2 describe-vpc-endpoints --region "$REGION"       --filters Name=vpc-id,Values="$VPC" Name=service-name,Values="com.amazonaws.$REGION.$SVC"       --query 'length(VpcEndpoints[?State==`available`])' --output text 2>/dev/null)
+    if [ "$N" = "1" ]; then
+      ok "$SVC endpoint present"
+    else
+      flag "$SVC gateway endpoint missing - it is free, so there is no reason for it to be gone"
+    fi
+  done
+fi
+
 # Budget must be MONTHLY and must warn BEFORE the money is gone, not after.
 BUDGET="chess-cloud-monthly"
 ACCT=$(aws sts get-caller-identity --query Account --output text)

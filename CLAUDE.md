@@ -105,7 +105,13 @@ Ordered so that nothing is destroyed before its replacement is proven — **the 
   **The evaluator followed and was verified the same way**: ENI `10.0.22.102` in the new VPC, a real game evaluated end to end — `done GAME#2020-11#5780873839: acpl=163 blunders=3`, written back as `evalDepth 18`. Stockfish ran to full depth, so the AWS-API paths (ECR, Logs, SQS, DynamoDB) all work for the CPU-bound service too. It is the simpler of the two to move: **zero upstream requests**, so there is no Chess.com path to prove.
 
   **Cleanup was a third, separate apply.** Only once both services were verified did the default VPC data sources and the old SG come out — `0 to add, 0 to change, 1 to destroy`, checked first against `describe-network-interfaces` to confirm nothing still held the group. Three applies rather than one, each independently reversible, which is the whole point of the sequencing.
-- [ ] **`check-drift.sh` extended** to assert whatever this phase decides is load-bearing — the same way it already asserts `MinCapacity == 0` per service and `MaxCapacity == 1` scoped to ingestion.
+- [x] **`check-drift.sh` extended** — three new checks, 3 Sep 2026. Building a VPC because the default one is *undeclared state nothing can assert on*, and then asserting nothing about it, would have moved that gap rather than closed it.
+
+  1. **The task SG has zero inbound rules.** The one check here guarding a security property rather than a cost: this absence is what made public subnets defensible, and a single console click would end it silently.
+  2. **Both services are in the purpose-built VPC's subnets.** The important one — a service reverting to the default VPC would keep working *perfectly*, since that is where it ran until today, so nothing but this check would ever surface it.
+  3. **Both gateway endpoints exist.** They are free, which means nothing pressures them to exist — the usual reason a free thing quietly disappears. S3 is on the ECR image-pull path, so losing it breaks task starts rather than being cosmetic.
+
+  **Each was proved to fail, not just to pass.** A check only ever seen passing is untested: all four negative cases were forced (SG absent, VPC absent, services in the wrong subnets, endpoints absent) and each flagged and exited 1.
 - [ ] **Verify the outbound paths still work** after the move: a real ingestion run reaching Chess.com, and a real evaluation run reaching DynamoDB, SQS, ECR and Logs. **ECR is the one to watch** — a task that cannot pull its image fails before any application code runs, so it looks like a platform fault rather than a networking one.
 
 ## What must not change
