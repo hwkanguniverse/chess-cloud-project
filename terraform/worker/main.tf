@@ -109,6 +109,15 @@ data "terraform_remote_state" "queue" {
   }
 }
 
+data "terraform_remote_state" "network" {
+  backend = "s3"
+  config = {
+    bucket = "chess-cloud-tfstate-961868442307"
+    key    = "network/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
 locals {
   table_name = data.terraform_remote_state.data.outputs.table_name
   table_arn  = data.terraform_remote_state.data.outputs.table_arn
@@ -119,9 +128,23 @@ locals {
   eval_queue_url  = data.terraform_remote_state.queue.outputs.eval_queue_url
   eval_queue_arn  = data.terraform_remote_state.queue.outputs.eval_queue_arn
   eval_queue_name = element(split(":", local.eval_queue_arn), length(split(":", local.eval_queue_arn)) - 1)
+
+  # The purpose-built VPC from terraform/network/. Phase 6 moves the services
+  # into it one at a time, so both networks are referenced at once during the
+  # migration - see the comment on the default VPC data sources below.
+  vpc_subnet_ids = data.terraform_remote_state.network.outputs.public_subnet_ids
+  vpc_sg_id      = data.terraform_remote_state.network.outputs.tasks_security_group_id
 }
 
-# Default VPC networking: public subnets, no NAT, no ALB.
+# --- Default VPC: being retired, Phase 6 ------------------------------------
+#
+# Kept only until the evaluator moves. Ingestion now runs in the purpose-built
+# VPC (terraform/network/); the evaluator still runs here. Moving one service
+# at a time is deliberate: the two are independent, so a failure after the
+# move has one candidate cause rather than two.
+#
+# Delete these three resources - and this comment - once the evaluator has
+# moved and been verified.
 data "aws_vpc" "default" {
   default = true
 }
@@ -357,10 +380,14 @@ resource "aws_ecs_service" "worker" {
   }
 
   network_configuration {
-    subnets         = data.aws_subnets.default.ids
-    security_groups = [aws_security_group.worker.id]
+    # Moved to the purpose-built VPC, Phase 6. The evaluator below still runs
+    # in the default VPC until this one is verified - one service at a time,
+    # so a failure has one candidate cause.
+    subnets         = local.vpc_subnet_ids
+    security_groups = [local.vpc_sg_id]
     # Public IP is what replaces the NAT Gateway: without one of the two the
-    # task cannot reach SQS/ECR and dies pulling its image.
+    # task cannot reach SQS/ECR and dies pulling its image. Still true in the
+    # new VPC - its subnets are public for exactly this reason.
     assign_public_ip = true
   }
 
