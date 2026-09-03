@@ -95,6 +95,19 @@ variable "az_count" {
   default     = 2
 }
 
+variable "drill_break_egress" {
+  description = <<-EOT
+    DRILL ONLY. Removes the default route to the internet gateway, which is
+    the path to ECR and CloudWatch Logs - neither has a free gateway endpoint.
+
+    Exists to answer one of Phase 6's failure-path questions: what does a task
+    that cannot reach ECR actually look like, and is it distinguishable from
+    an application fault? Must be false in any committed state.
+  EOT
+  type        = bool
+  default     = false
+}
+
 # --- The VPC ---------------------------------------------------------------
 
 resource "aws_vpc" "main" {
@@ -162,7 +175,12 @@ resource "aws_route_table" "public" {
 # What makes these subnets public: a default route to the internet gateway.
 # "Public subnet" is not a subnet attribute, it is this route - the single
 # most common misconception in the VPC material.
+# DRILL, Phase 6 - TEMPORARY. Set drill_break_egress = true to remove the
+# default route and watch what a task that cannot reach ECR looks like.
+# Restore with `terraform apply` after flipping it back to false.
 resource "aws_route" "public_internet" {
+  count = var.drill_break_egress ? 0 : 1
+
   route_table_id         = aws_route_table.public.id
   destination_cidr_block = "0.0.0.0/0"
   gateway_id             = aws_internet_gateway.main.id

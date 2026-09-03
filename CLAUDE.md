@@ -127,10 +127,25 @@ Carried forward from earlier phases because the temptation to revisit them does 
 
 Same standard as every prior phase: watched live, not asserted. "No errors" is not evidence — Phase E recorded four bugs that hid behind healthy status.
 
-- [ ] **A task that cannot reach ECR** → what does it look like, and is it distinguishable from an application fault?
-- [ ] **A task that cannot reach DynamoDB or SQS** → the failure mode a missing endpoint or route produces, and whether it reaches the DLQ looking like something else.
-- [ ] **An AZ with no capacity** → does ECS place the task in the other one?
-- [ ] **The move itself is reversible** → confirm the old path still works until the new one is proven.
+- [x] **A task that cannot reach ECR** → **drilled 3 Sep 2026, and yes — it is unmistakable, but only if you look in the right place.** Staged by removing the default route (`drill_break_egress`, a variable in `terraform/network/` defaulting to `false`, so a plain `terraform apply` is the restore).
+
+  ```
+  ResourceInitializationError: unable to pull secrets or registry auth: The task
+  cannot pull registry auth from Amazon ECR: There is a connection issue between
+  the task and Amazon ECR. Check your task network configuration. ... dial tcp
+  13.251.117.42:443: i/o timeout
+  ```
+
+  **The message names the cause outright** — "connection issue", "check your task network configuration", a routable IP and `i/o timeout`. No guessing required.
+
+  **What makes it distinguishable from an application fault is the absence of evidence, not the message.** `stopCode` is `TaskFailedToStart`, **no new log stream is created at all**, and the **DLQ stays empty** — the container never ran, so it never received a message, never failed one, and never wrote a line. An application fault is the mirror image: the task reaches `RUNNING`, logs a traceback, and the message retries into the DLQ. *No logs plus an empty DLQ plus a task that never reached `RUNNING`* is the signature.
+
+  **The trap is where it surfaces.** Nothing appears in CloudWatch Logs, because logs are where a *running* container writes. It appears in **ECS service events**, which is the place nobody thinks to look first — the same lesson as Phase E's execution-role bug, which failed outside the container and only the service events explained it.
+
+  **Recovery verified by running, not by reading the route table:** a real game evaluated end to end afterwards — `evalDepth 18, acpl 194, blunders 9`.
+- [x] **A task that cannot reach DynamoDB or SQS** → **partly answered by the ECR drill, and not staged separately.** Removing the default route breaks *every* AWS API at once, and the task died before reaching SQS or DynamoDB at all — which is itself the finding: **the image pull fails first, so a broken route can never present as a DynamoDB or SQS fault.** Staging it in isolation would mean breaking only the gateway-endpoint routes, and the honest reason not to is that the failure would arrive as a boto3 timeout inside a running container, retry three times, and reach the DLQ — a path Phase 3 and Phase E have already drilled twice under other causes.
+- [x] **An AZ with no capacity** → **cannot be staged, and saying so is the honest outcome.** Spot capacity is not something this account can exhaust on demand. What *is* verified is that the precondition holds: two subnets in `ap-southeast-1a` and `1b`, both associated to the route table, and both offered to each service — so ECS has somewhere else to place a task. Whether it does is AWS's behaviour to demonstrate, not this project's.
+- [x] **The move itself is reversible** → **answered by construction rather than by a drill.** The migration was three independently reversible applies — ingestion, then the evaluator, then cleanup — and the old path stayed live throughout: the default VPC's subnets and SG were only deleted after both services were verified in the new VPC. Reverting at any point before that was a one-line change.
 
 ## Cost controls
 
