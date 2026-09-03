@@ -7,9 +7,10 @@
 # in the same shape so the plumbing is proven before the engine exists.
 #
 # Cost posture, per the roadmap:
-#   - No NAT Gateway (~$32/mo): the task runs in the default VPC's public
-#     subnets with a public IP. Nothing routes TO a queue consumer - it polls
-#     out, nothing reaches in - so the security group allows zero inbound.
+#   - No NAT Gateway (~$32/mo): the tasks run in the purpose-built VPC's
+#     public subnets (terraform/network/) with a public IP. Nothing routes TO
+#     a queue consumer - it polls out, nothing reaches in - so the shared
+#     security group allows zero inbound.
 #   - Scale to zero: min 0 tasks, driven by queue depth. The difference
 #     between ~$0 and ~$44/month, and the main cost lever in the design.
 
@@ -129,46 +130,10 @@ locals {
   eval_queue_arn  = data.terraform_remote_state.queue.outputs.eval_queue_arn
   eval_queue_name = element(split(":", local.eval_queue_arn), length(split(":", local.eval_queue_arn)) - 1)
 
-  # The purpose-built VPC from terraform/network/. Phase 6 moves the services
-  # into it one at a time, so both networks are referenced at once during the
-  # migration - see the comment on the default VPC data sources below.
+  # The purpose-built VPC from terraform/network/. Both services now run
+  # here; the default VPC is no longer referenced by this root at all.
   vpc_subnet_ids = data.terraform_remote_state.network.outputs.public_subnet_ids
   vpc_sg_id      = data.terraform_remote_state.network.outputs.tasks_security_group_id
-}
-
-# --- Default VPC: being retired, Phase 6 ------------------------------------
-#
-# Kept only until the evaluator moves. Ingestion now runs in the purpose-built
-# VPC (terraform/network/); the evaluator still runs here. Moving one service
-# at a time is deliberate: the two are independent, so a failure after the
-# move has one candidate cause rather than two.
-#
-# Delete these three resources - and this comment - once the evaluator has
-# moved and been verified.
-data "aws_vpc" "default" {
-  default = true
-}
-
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
-}
-
-# No ingress blocks at all: a queue consumer accepts no connections. Egress
-# only, for SQS/DynamoDB/ECR/CloudWatch over HTTPS.
-resource "aws_security_group" "worker" {
-  name        = "chess-cloud-worker"
-  description = "Analysis worker - egress only, nothing routes in"
-  vpc_id      = data.aws_vpc.default.id
-
-  egress {
-    from_port   = 443
-    to_port     = 443
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
 }
 
 # --- ECR -------------------------------------------------------------------
@@ -380,9 +345,9 @@ resource "aws_ecs_service" "worker" {
   }
 
   network_configuration {
-    # Moved to the purpose-built VPC, Phase 6. The evaluator below still runs
-    # in the default VPC until this one is verified - one service at a time,
-    # so a failure has one candidate cause.
+    # The purpose-built VPC, Phase 6. Moved first and verified before the
+    # evaluator followed - one service at a time, so a failure after a move
+    # has one candidate cause rather than two.
     subnets         = local.vpc_subnet_ids
     security_groups = [local.vpc_sg_id]
     # Public IP is what replaces the NAT Gateway: without one of the two the
@@ -677,8 +642,11 @@ resource "aws_ecs_service" "evaluator" {
   }
 
   network_configuration {
-    subnets          = data.aws_subnets.default.ids
-    security_groups  = [aws_security_group.worker.id]
+    # Moved to the purpose-built VPC, Phase 6, after ingestion was verified
+    # there. The evaluator is the simpler of the two to move: it makes zero
+    # upstream requests, so the only paths that matter are AWS APIs.
+    subnets          = local.vpc_subnet_ids
+    security_groups  = [local.vpc_sg_id]
     assign_public_ip = true
   }
 

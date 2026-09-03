@@ -94,13 +94,17 @@ Ordered so that nothing is destroyed before its replacement is proven — **the 
 
   Renamed from `worker` to `tasks`: the old name read as one service and was shared by two.
 - [ ] **Task roles reviewed while the networking moves.** The skill lists "task roles" as part of this phase, and Phase E's four IAM bugs are the argument for looking again — `Query`, `BatchWriteItem`, `SendMessageBatch` and a log group scope, each of which failed only at runtime.
-- [~] **Move one service first, verify, then the other.** **Ingestion moved and verified 3 Sep 2026; the evaluator is still in the default VPC.**
+- [x] **Move one service first, verify, then the other.** **Both moved and verified 3 Sep 2026. The default VPC is no longer referenced by this project, and the old `chess-cloud-worker` SG is destroyed — 0 ENIs remain in `vpc-01d8f504ac1cdfa25`.**
 
   Verified by running it, not by reading the plan: task ENI `10.0.23.20` in `vpc-03261b9da88bf8920`, subnet `...c923899d`, SG `chess-cloud-tasks`. A real message produced `fetching chesscom/theohwk/2024-01 (conditional)` → `unchanged, skipping` — which exercises **every** outbound path at once: ECR and S3 to pull the image, Logs to write that line, SQS to receive, DynamoDB to read the stored ETag, and Chess.com over HTTPS to get the 304. DLQ empty, drift clean, service back to zero.
 
   **The migration itself was a one-line, in-place change** — `0 to add, 1 to change, 0 to destroy`, swapping three default subnets for two and the SG. No task was recreated, because both services were already at zero.
 
   **A test-harness bug, not a networking one, and worth recording as a near-miss.** The first drill message was hand-written and omitted `id`, which `worker.py` requires; the worker logged `failed, leaving for retry/DLQ: 'id'`. For a moment that read as "the move broke ingestion" — the failure mode this phase warned about, where a networking fault and an application fault look alike. It was neither: the message was malformed. **A hand-rolled test message is not the contract**; the real producer is the submit Lambda. Purged and re-sent correctly.
+
+  **The evaluator followed and was verified the same way**: ENI `10.0.22.102` in the new VPC, a real game evaluated end to end — `done GAME#2020-11#5780873839: acpl=163 blunders=3`, written back as `evalDepth 18`. Stockfish ran to full depth, so the AWS-API paths (ECR, Logs, SQS, DynamoDB) all work for the CPU-bound service too. It is the simpler of the two to move: **zero upstream requests**, so there is no Chess.com path to prove.
+
+  **Cleanup was a third, separate apply.** Only once both services were verified did the default VPC data sources and the old SG come out — `0 to add, 0 to change, 1 to destroy`, checked first against `describe-network-interfaces` to confirm nothing still held the group. Three applies rather than one, each independently reversible, which is the whole point of the sequencing.
 - [ ] **`check-drift.sh` extended** to assert whatever this phase decides is load-bearing — the same way it already asserts `MinCapacity == 0` per service and `MaxCapacity == 1` scoped to ingestion.
 - [ ] **Verify the outbound paths still work** after the move: a real ingestion run reaching Chess.com, and a real evaluation run reaching DynamoDB, SQS, ECR and Logs. **ECR is the one to watch** — a task that cannot pull its image fails before any application code runs, so it looks like a platform fault rather than a networking one.
 
