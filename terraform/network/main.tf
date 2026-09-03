@@ -9,7 +9,7 @@
 # infrastructure here that cannot be rebuilt from code. That contradicts the
 # project's own no-console-clicking rule, and the fix costs $0.
 #
-# **Subnets are public, deliberately.** See the decision log in CLAUDE.md. The
+# **Subnets are public, deliberately.** See the decision log in PHASE-6.md. The
 # short version: private subnets defend against something reaching the tasks,
 # which already cannot happen - nothing routes TO a queue consumer and the
 # security group has zero inbound rules. What they would actually buy is
