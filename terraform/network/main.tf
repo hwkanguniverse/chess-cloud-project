@@ -210,6 +210,53 @@ resource "aws_vpc_endpoint" "s3" {
   }
 }
 
+# --- Security group --------------------------------------------------------
+#
+# **One group for both services, and that is a decision rather than laziness.**
+#
+# The obvious least-privilege move is a group each: ingestion talks to
+# Chess.com, the evaluator makes *zero* upstream requests, so why let the
+# evaluator reach the internet at all? The answer is that the rule you would
+# write is identical either way. Restricting egress means naming what the task
+# may reach, and the evaluator must still reach ECR, CloudWatch Logs and SQS -
+# none of which has a free gateway endpoint, all of which sit on large and
+# changing AWS ranges. In practice that is 443 to 0.0.0.0/0: the same rule,
+# under a name claiming it is tighter.
+#
+# Two identical rule sets with a misleading name is worse than one honest
+# group - it is a control that looks like it enforces something and does not,
+# which is the exact pattern Phase E kept finding behind healthy status.
+#
+# Splitting them becomes real only with interface endpoints for ECR, Logs and
+# SQS (~$28/mo), which is the option already rejected in the decision log for
+# 14x the project budget. Revisit the split if those ever exist; until then
+# one group states the truth.
+#
+# Named for what it holds - both task families - rather than "worker", which
+# read as one service and was shared by two.
+resource "aws_security_group" "tasks" {
+  name        = "chess-cloud-tasks"
+  description = "Fargate tasks - egress only, nothing routes in"
+  vpc_id      = aws_vpc.main.id
+
+  # **No ingress blocks at all, and this is the control doing the real work.**
+  # Both services are queue consumers: they poll SQS and are never a
+  # destination. With no inbound rule the public subnet is irrelevant to
+  # exposure - there is no listener and no path in. This absence is what made
+  # private subnets unnecessary, so it is the line to defend in review.
+  egress {
+    description = "HTTPS out: Chess.com for ingestion, AWS APIs for both"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "chess-cloud-tasks"
+  }
+}
+
 # --- Outputs ---------------------------------------------------------------
 
 output "vpc_id" {
@@ -228,4 +275,9 @@ output "public_subnet_ids" {
 
 output "route_table_id" {
   value = aws_route_table.public.id
+}
+
+output "tasks_security_group_id" {
+  description = "The one security group both Fargate services use."
+  value       = aws_security_group.tasks.id
 }
