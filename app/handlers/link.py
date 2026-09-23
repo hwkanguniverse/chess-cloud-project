@@ -25,6 +25,7 @@ PKCE verifier, and carries a TTL so an abandoned flow expires itself.
 import base64
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -41,6 +42,10 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 API_BASE = os.environ["API_BASE"]
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
+
+# The Lambda runtime owns the handler and its JSON format (logging_config in
+# Terraform); this only asks for the logger. It adds requestId to every line.
+log = logging.getLogger()
 
 LICHESS = "https://lichess.org"
 # Any client_id works: Lichess does not require pre-registration for public
@@ -232,7 +237,10 @@ def callback_lichess(event):
         )
         account = _get_json(f"{LICHESS}/api/account", token_response["access_token"])
     except Exception as exc:  # noqa: BLE001 - surface upstream failures as one 502
-        print(f"lichess exchange failed: {exc}")
+        log.exception(
+            f"lichess exchange failed: {exc}",
+            extra={"event": "lichess_exchange_failed"},
+        )
         return _html(502, "<h1>Link failed</h1><p>Lichess did not respond.</p>")
 
     username = str(account.get("username", "")).lower()

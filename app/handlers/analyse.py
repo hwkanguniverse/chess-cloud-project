@@ -27,6 +27,7 @@ every worker re-derive it.
 """
 
 import json
+import logging
 import os
 import re
 import time
@@ -40,6 +41,11 @@ EVAL_QUEUE_URL = os.environ["EVAL_QUEUE_URL"]
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 sqs = boto3.client("sqs")
+
+# The runtime owns the handler and its JSON format (logging_config in
+# Terraform); this only asks for the logger. requestId is added by the
+# runtime, and the same ID rides in every message this call queues.
+log = logging.getLogger()
 
 PLATFORM_RE = re.compile(r"^(chesscom|lichess)$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,50}$")
@@ -356,12 +362,15 @@ def select_games(pk):
     return todo, skipped, per_class, excluded, seen_any, capped
 
 
-def fan_out(pk, sks, user_id):
+def fan_out(pk, sks, user_id, request_id):
     """One message per game, ten at a time.
 
     SendMessageBatch is a distinct IAM action from SendMessage rather than a
     variant of it - granting only the latter fails every fan-out with
     AccessDenied, which this project has already been caught by once.
+
+    request_id is this invocation's, so every game's evaluator lines - and any
+    message that ends up in the DLQ - trace back to the analyse that queued it.
     """
     sent = 0
     for start in range(0, len(sks), 10):
@@ -372,7 +381,12 @@ def fan_out(pk, sks, user_id):
                 {
                     "Id": str(start + offset),
                     "MessageBody": json.dumps(
-                        {"pk": pk, "sk": sk, "requestedBy": user_id}
+                        {
+                            "pk": pk,
+                            "sk": sk,
+                            "requestedBy": user_id,
+                            "requestId": request_id,
+                        }
                     ),
                 }
                 for offset, sk in enumerate(chunk)
@@ -425,6 +439,17 @@ def handler(event, context):
             # Not an error: the work the caller asked for is already happening.
             # 202 with queued 0 says exactly that, and matches the shape of a
             # fully-evaluated player - both mean "nothing for you to pay for".
+            #
+            # Logged because it is the case request IDs exist for: two
+            # requests for one player, and only the other one queued anything.
+            log.info(
+                f"{pk} already has {already_queued} games in flight, queued nothing",
+                extra={
+                    "event": "analyse_already_queued",
+                    "pk": pk,
+                    "alreadyQueued": already_queued,
+                },
+            )
             return _response(
                 202,
                 {
@@ -462,7 +487,17 @@ def handler(event, context):
                 },
             )
 
-    queued = fan_out(pk, todo, user_id)
+    queued = fan_out(pk, todo, user_id, context.aws_request_id)
+    log.info(
+        f"queued {queued} games for {pk}, skipped {skipped}",
+        extra={
+            "event": "analyse_queued",
+            "pk": pk,
+            "queued": queued,
+            "skipped": skipped,
+            "requestedBy": user_id,
+        },
+    )
 
     # 202: the work is queued, not done. The client polls the player route,
     # where evaluated games gain their own statistics group as they land -

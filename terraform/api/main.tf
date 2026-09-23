@@ -584,6 +584,16 @@ resource "aws_lambda_function" "analyse" {
 
   runtime = "python3.13"
   handler = "analyse.handler"
+
+  # JSON logs from the runtime itself: stdlib logging calls become one
+  # JSON object per line with requestId stamped on, and START/END/REPORT
+  # become JSON too. The workers' formatter copies these key names, so one
+  # query spans every log group. See app/worker/jsonlog.py.
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   # Paginates a player's games and fans out up to 400 messages in batches of
   # ten. Still no outbound HTTP, but more work than a read handler - sized
   # like submit, which does the same shape of fan-out over archives.
@@ -617,6 +627,12 @@ resource "aws_lambda_function" "submit" {
 
   runtime = "python3.13"
   handler = "submit.handler"
+
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   timeout = var.submit_timeout
 
   environment {
@@ -645,6 +661,12 @@ resource "aws_lambda_function" "link" {
 
   runtime = "python3.13"
   handler = "link.handler"
+
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   # Longer than the others: this one makes two outbound calls to lichess.org
   # (token exchange, then account lookup) and a slow upstream should fail the
   # request rather than the function.
@@ -673,6 +695,12 @@ resource "aws_lambda_function" "player" {
 
   runtime = "python3.13"
   handler = "player.handler"
+
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   # Not var.lambda_timeout: that is sized for one DynamoDB call, and this
   # route now paginates a second Query across the player's whole game
   # partition to derive evaluation state. A heavy account is tens of thousands
@@ -704,6 +732,12 @@ resource "aws_lambda_function" "players" {
 
   runtime = "python3.13"
   handler = "players.handler"
+
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   # Longer than the other reads: a Scan pages through the entire table, and
   # while that is fast at the current size it is the one read whose duration
   # grows with everything ever ingested rather than with what it returns.
@@ -727,6 +761,12 @@ resource "aws_lambda_function" "status" {
 
   runtime = "python3.13"
   handler = "status.handler"
+
+  logging_config {
+    log_format            = "JSON"
+    application_log_level = "INFO"
+    system_log_level      = "INFO"
+  }
   timeout = var.lambda_timeout
 
   environment {

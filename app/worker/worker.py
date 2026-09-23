@@ -33,6 +33,10 @@ import urllib.request
 import boto3
 from boto3.dynamodb.conditions import Key
 
+from jsonlog import get_logger, log_context, message_fields
+
+log = get_logger("worker")
+
 QUEUE_URL = os.environ["QUEUE_URL"]
 TABLE_NAME = os.environ["TABLE_NAME"]
 
@@ -122,7 +126,10 @@ def fetch_archive(username, archive, etag):
                 raise PermanentFailure(_upstream_message(exc)) from exc
 
             if exc.code == 429 and attempt < RATE_LIMIT_RETRIES - 1:
-                print(f"429, backing off {backoff}s", flush=True)
+                log.warning(
+                    f"429, backing off {backoff}s",
+                    extra={"event": "rate_limited", "backoff_s": backoff},
+                )
                 time.sleep(backoff)
                 backoff *= 2
                 continue
@@ -291,7 +298,10 @@ def write_games(platform, username, archive, rows):
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
     if stale:
-        print(f"removing {len(stale)} stale games from {archive}", flush=True)
+        log.info(
+            f"removing {len(stale)} stale games from {archive}",
+            extra={"event": "stale_games_removed", "archive": archive, "count": len(stale)},
+        )
         with table.batch_writer() as batch:
             for sk in stale:
                 batch.delete_item(Key={"PK": pk, "SK": sk})
@@ -313,14 +323,20 @@ def process(message):
     existing = table.get_item(Key=key).get("Item") or {}
     etag = existing.get("etag")
 
-    print(f"fetching {analysis_id}" + (" (conditional)" if etag else ""), flush=True)
+    log.info(
+        f"fetching {analysis_id}" + (" (conditional)" if etag else ""),
+        extra={"event": "fetch_start", "analysis_id": analysis_id, "conditional": bool(etag)},
+    )
     try:
         games, new_etag = fetch_archive(username, archive, etag)
     except PermanentFailure as exc:
         # Terminal for this attempt, but not a verdict on the player: submit
         # lets a FAILED month be re-submitted, because a username can be
         # released and re-registered by someone else entirely.
-        print(f"permanent failure {analysis_id}: {exc.reason}", flush=True)
+        log.warning(
+            f"permanent failure {analysis_id}: {exc.reason}",
+            extra={"event": "permanent_failure", "analysis_id": analysis_id, "reason": exc.reason},
+        )
         table.update_item(
             Key=key,
             UpdateExpression="SET #s = :s, #e = :e, checkedAt = :t",
@@ -337,7 +353,10 @@ def process(message):
         # 304: unchanged since last fetch. No parse, no aggregate, no games
         # written - only a note that it was checked, so the saving is visible
         # in the item rather than merely claimed.
-        print(f"unchanged, skipping {analysis_id}", flush=True)
+        log.info(
+            f"unchanged, skipping {analysis_id}",
+            extra={"event": "archive_unchanged", "analysis_id": analysis_id},
+        )
         table.update_item(
             Key=key,
             UpdateExpression="SET #s = :s, checkedAt = :t, lastCheckHit = :h",
@@ -381,11 +400,14 @@ def process(message):
             ":h": False,
         },
     )
-    print(f"done {analysis_id}: {totals['games']} games", flush=True)
+    log.info(
+        f"done {analysis_id}: {totals['games']} games",
+        extra={"event": "archive_done", "analysis_id": analysis_id, "games": totals["games"]},
+    )
 
 
 def main():
-    print("worker up, polling", flush=True)
+    log.info("worker up, polling", extra={"event": "worker_up"})
     while not shutting_down:
         resp = sqs.receive_message(
             QueueUrl=QUEUE_URL,
@@ -393,18 +415,24 @@ def main():
             WaitTimeSeconds=20,  # long poll; the idle loop costs one call per 20s
         )
         for message in resp.get("Messages", []):
-            try:
-                process(message)
-            except Exception as exc:  # noqa: BLE001
-                # Do NOT delete: leaving the message is what drives the retry
-                # counter, and after max receives the redrive policy moves it
-                # to the DLQ. Deleting here would silently discard the work.
-                print(f"failed, leaving for retry/DLQ: {exc}", flush=True)
-                continue
-            sqs.delete_message(
-                QueueUrl=QUEUE_URL, ReceiptHandle=message["ReceiptHandle"]
-            )
-    print("SIGTERM received, exiting cleanly", flush=True)
+            # Every line about this message - including the failure below -
+            # carries the requestId of the submit that queued it.
+            with log_context(**message_fields(message, analysis_id="id")):
+                try:
+                    process(message)
+                except Exception as exc:  # noqa: BLE001
+                    # Do NOT delete: leaving the message is what drives the retry
+                    # counter, and after max receives the redrive policy moves it
+                    # to the DLQ. Deleting here would silently discard the work.
+                    log.exception(
+                        f"failed, leaving for retry/DLQ: {exc}",
+                        extra={"event": "message_failed"},
+                    )
+                    continue
+                sqs.delete_message(
+                    QueueUrl=QUEUE_URL, ReceiptHandle=message["ReceiptHandle"]
+                )
+    log.info("SIGTERM received, exiting cleanly", extra={"event": "worker_exit"})
     return 0
 
 

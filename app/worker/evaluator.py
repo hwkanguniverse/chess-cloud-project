@@ -42,6 +42,10 @@ import chess.engine
 import chess.pgn
 from boto3.dynamodb.conditions import Key
 
+from jsonlog import get_logger, log_context, message_fields
+
+log = get_logger("evaluator")
+
 TABLE_NAME = os.environ["TABLE_NAME"]
 QUEUE_URL = os.environ["EVAL_QUEUE_URL"]
 ENGINE_PATH = os.environ.get("STOCKFISH_PATH", "/usr/games/stockfish")
@@ -102,7 +106,7 @@ def _on_sigterm(signum, frame):
     replays it.
     """
     global _stop
-    print("SIGTERM received, finishing current game", flush=True)
+    log.info("SIGTERM received, finishing current game", extra={"event": "sigterm"})
     _stop = True
 
 
@@ -241,18 +245,18 @@ def process(message):
         # The game was deleted between fan-out and here - a re-fetch can drop
         # games that Chess.com no longer serves. Nothing to do, and nothing
         # wrong: acknowledge it rather than retrying into the DLQ.
-        print(f"gone, skipping {sk}", flush=True)
+        log.info(f"gone, skipping {sk}", extra={"event": "game_gone", "sk": sk})
         return
 
     if item.get("evalDepth") == DEPTH:
         # Already done at this depth. The Lambda filters these out when it
         # fans out, so reaching here means a duplicate delivery - which SQS
         # allows and which costs nothing to absorb.
-        print(f"already evaluated {sk}", flush=True)
+        log.info(f"already evaluated {sk}", extra={"event": "game_already_evaluated", "sk": sk})
         return
 
     if not item.get("pgn"):
-        print(f"no pgn for {sk}", flush=True)
+        log.warning(f"no pgn for {sk}", extra={"event": "game_no_pgn", "sk": sk})
         return
 
     # One engine process per message would start Stockfish per game and throw
@@ -271,7 +275,7 @@ def process(message):
             UpdateExpression="SET evalError = :e, evalDepth = :d",
             ExpressionAttributeValues={":e": "unparseable pgn", ":d": DEPTH},
         )
-        print(f"unparseable {sk}", flush=True)
+        log.warning(f"unparseable {sk}", extra={"event": "game_unparseable", "sk": sk})
         return
 
     table.update_item(
@@ -296,7 +300,15 @@ def process(message):
             ":t": int(time.time()),
         },
     )
-    print(f"done {sk}: acpl={result['acpl']} blunders={result['blunders']}", flush=True)
+    log.info(
+        f"done {sk}: acpl={result['acpl']} blunders={result['blunders']}",
+        extra={
+            "event": "game_done",
+            "sk": sk,
+            "acpl": result["acpl"],
+            "blunders": result["blunders"],
+        },
+    )
 
 
 _engine_process = None
@@ -318,7 +330,10 @@ def _engine():
 
 def main():
     signal.signal(signal.SIGTERM, _on_sigterm)
-    print(f"evaluator up, depth {DEPTH}, one game per message, polling", flush=True)
+    log.info(
+        f"evaluator up, depth {DEPTH}, one game per message, polling",
+        extra={"event": "evaluator_up", "depth": DEPTH},
+    )
 
     while not _stop:
         # Ten at a time. Games are seconds of work each, so fetching one per
@@ -333,24 +348,34 @@ def main():
                 # The rest of the batch stays invisible until the visibility
                 # timeout returns it, then another task picks it up.
                 break
-            try:
-                process(message)
-            except Exception as exc:  # noqa: BLE001
-                # Leave it for retry, then the DLQ. Same standard as the
-                # ingestion worker: a generic failure must not silently
-                # disappear.
-                print(f"failed, leaving for retry/DLQ: {exc}", flush=True)
-                continue
-            # Deleted only after the write succeeded, so a crash mid-game
-            # replays that one game rather than losing it.
-            sqs.delete_message(
-                QueueUrl=QUEUE_URL,
-                ReceiptHandle=message["ReceiptHandle"],
+            # pk as well as sk: sk alone is GAME#<month>#<id> and does not
+            # say whose game it is. requestedBy is the Cognito sub, so a
+            # user's report of a bad run can be found without their requestId.
+            fields = message_fields(
+                message, pk="pk", sk="sk", requestedBy="requestedBy"
             )
+            with log_context(**fields):
+                try:
+                    process(message)
+                except Exception as exc:  # noqa: BLE001
+                    # Leave it for retry, then the DLQ. Same standard as the
+                    # ingestion worker: a generic failure must not silently
+                    # disappear.
+                    log.exception(
+                        f"failed, leaving for retry/DLQ: {exc}",
+                        extra={"event": "message_failed"},
+                    )
+                    continue
+                # Deleted only after the write succeeded, so a crash mid-game
+                # replays that one game rather than losing it.
+                sqs.delete_message(
+                    QueueUrl=QUEUE_URL,
+                    ReceiptHandle=message["ReceiptHandle"],
+                )
 
     if _engine_process is not None:
         _engine_process.quit()
-    print("exiting cleanly", flush=True)
+    log.info("exiting cleanly", extra={"event": "evaluator_exit"})
     return 0
 
 

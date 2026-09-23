@@ -51,7 +51,7 @@ Run `bash scripts/check-drift.sh` after every apply.
 Stated first, because this phase is a retrofit and the gaps are specific rather than general.
 
 - **19 `print()` calls across the app.** No `logging`, no levels, no structure. They are genuinely useful lines — `fetching … (conditional)`, `done GAME#…: acpl=163 blunders=9` — but they are prose, so nothing can filter, count or alarm on them.
-- **No request IDs anywhere.** A player's submit fans out to ~200 messages across two services and several minutes. Nothing ties those log lines back to the request that caused them.
+- **No request IDs anywhere.** Two requests fan out, one queue hop each: submit → ~22 month messages → ingestion, and analyse → ~200 game messages → evaluator. Nothing chains across both services. Nothing ties a worker's log lines back to the request that caused them.
 - **Every alarm is a scaling alarm.** Four exist — `queue-has-work`, `queue-empty`, and the evaluator's pair. All of them exist to *move task counts*. **Not one of them tells you something is wrong.**
 - **The DLQ has no alarm.** `check-drift.sh` polls it, but only when run by hand. A message can sit there indefinitely.
 - **Log retention is 14 days** on every project group, which is deliberate and fine.
@@ -71,8 +71,8 @@ Instrumentation that answers none of those is decoration.
 
 Each of these has a real trade-off and a real price.
 
-- [ ] **Structured JSON logs — worth the rewrite, or not?** The skill lists them. They make lines filterable and metric-filterable, which is what everything else in this phase depends on. The cost is touching all 19 call sites and losing human-readable output when tailing. **Options: JSON everywhere; JSON in the workers only; keep prose and parse it with metric filters.**
-- [ ] **Request IDs: how far do they need to travel?** A request ID is cheap inside one Lambda and real work across an SQS fan-out — it has to ride in the message body and be logged by the worker. Worth deciding whether the goal is per-Lambda correlation or genuine end-to-end tracing.
+- [x] **Structured JSON logs — worth the rewrite, or not?** *Decided: JSON everywhere — see the decision log.* The skill lists them. They make lines filterable and metric-filterable, which is what everything else in this phase depends on. The cost is touching all 19 call sites and losing human-readable output when tailing. **Options: JSON everywhere; JSON in the workers only; keep prose and parse it with metric filters.**
+- [x] **Request IDs: how far do they need to travel?** *Decided: across the queue — see the decision log.* A request ID is cheap inside one Lambda and real work across an SQS fan-out — it has to ride in the message body and be logged by the worker. Worth deciding whether the goal is per-Lambda correlation or genuine end-to-end tracing.
 - [ ] **Which alarm actually gets built first?** The skill's requirement is "an alarm that demonstrably fires". The DLQ alarm is the obvious candidate: it is the only current failure mode with no human in the loop. **Cost: an SNS topic and email, both ~$0.**
 - [ ] **X-Ray: yes or no?** The skill lists it. It costs per trace beyond the free tier, and this project's slow path is a *queue wait*, not a call graph — the thing X-Ray is best at showing is the thing Phase 3 already measured by hand. **Name the question it answers that CloudWatch cannot**, or cut it.
 - [ ] **Dashboard: one, or none?** A CloudWatch dashboard is $3/month beyond the first three — real money at this budget. Decide whether the audience is me during a drill (logs are better) or a portfolio screenshot (a dashboard is better).
@@ -81,7 +81,7 @@ Each of these has a real trade-off and a real price.
 
 Ordered so each piece is verifiable before the next depends on it.
 
-- [ ] **Structured logging**, in whatever form is decided above, with the existing useful lines preserved rather than replaced.
+- [x] **Structured logging**, in whatever form is decided above, with the existing useful lines preserved rather than replaced. *Seen live in all three places — ingestion (`fetch_start` → `archive_unchanged`), evaluator (`game_already_evaluated`), and a Lambda (`requestId` on app lines, `platform.report` as JSON). Not yet seen live: the `message_failed` path and link's `lichess_exchange_failed`; the DLQ drill will exercise the former.*
 - [ ] **Request IDs threaded through** the paths that fan out, so one submit can be followed across services.
 - [ ] **A metric filter** turning a log pattern into a number — the SOA-shaped skill this phase is for.
 - [ ] **At least one alarm that demonstrably fires**, wired to something that reaches me. The skill's wording is deliberate: an alarm nobody has seen fire is an assertion, not a control.
@@ -127,7 +127,8 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
-| *(none yet)* | | | |
+| Log format | **JSON everywhere.** Workers: stdlib `logging` with a small formatter. Lambdas: the runtime's native JSON log format. Both use the same key names, so one query spans every log group | JSON in the workers only; keep prose and parse it with metric filters | A metric filter on prose is coupled to exact wording — reword a line and the metric flatlines while the alarm stays green, the failure that looks like success. JSON also gives a request ID a field to live in. Lambdas use the native format because each ships as a single-file zip, and it stamps `requestId` on every line for free |
+| Request IDs | **Thread the Lambda's own `requestId` through the queue.** submit and analyse put it in each message body; the workers log it on every line for that message. Evaluator lines also gain `pk` | Per-Lambda only (what native JSON already gives); natural keys only (`analysis_id`, `sk`) | Natural keys identify the *thing*, not the *request* — and this app deliberately lets two requests touch the same keys. The deciding case is the DLQ: a dead message body should say which request created it, so one query finds the Lambda's side and every retry. Cheap because each fan-out is one hop. Reusing Lambda's ID means no second ID to reconcile |
 
 ---
 

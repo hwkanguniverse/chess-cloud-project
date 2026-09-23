@@ -19,6 +19,7 @@ re-queues only the month still being played.
 
 import datetime
 import json
+import logging
 import os
 import re
 import time
@@ -43,6 +44,11 @@ API_ROOT = "https://api.chess.com/pub"
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 sqs = boto3.client("sqs")
 cognito = boto3.client("cognito-idp")
+
+# The runtime owns the handler and its JSON format (logging_config in
+# Terraform); this only asks for the logger. requestId is added by the
+# runtime, and the same ID rides in every message this call queues.
+log = logging.getLogger()
 
 # sub -> verified, for the life of this execution environment. A user does not
 # become unverified, so a cached True stays true; a cached False is not stored
@@ -240,12 +246,15 @@ def claim_month(player_key, archive, platform, username, user_id, now, live):
         return False
 
 
-def queue_months(platform, username, months):
+def queue_months(platform, username, months, request_id):
     """Send one message per month, ten at a time.
 
     Batched because a long-lived account is ~150 months and this runs inside a
     user-facing request. One message per month is what keeps the worker's
     contract intact: one message, one HTTP request, one item.
+
+    request_id is this invocation's, so the worker's lines for every month
+    trace back to the submit that queued it.
     """
     for start in range(0, len(months), 10):
         batch = months[start : start + 10]
@@ -260,6 +269,7 @@ def queue_months(platform, username, months):
                             "platform": platform,
                             "username": username,
                             "archive": archive,
+                            "requestId": request_id,
                         }
                     ),
                 }
@@ -336,7 +346,16 @@ def handler(event, context):
             player_key, archive, platform, username, user_id, now, archive == live
         )
     ]
-    queue_months(platform, username, queued)
+    queue_months(platform, username, queued, context.aws_request_id)
+    log.info(
+        f"queued {len(queued)} of {len(months)} months for {platform}/{username}",
+        extra={
+            "event": "submit_queued",
+            "player": f"{platform}/{username}",
+            "archives": len(months),
+            "queued": len(queued),
+        },
+    )
 
     domain = event["requestContext"]["domainName"]
     return _response(

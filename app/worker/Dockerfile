@@ -22,7 +22,7 @@ RUN apt-get update -qq \
 RUN pip install --no-cache-dir boto3 chess
 
 WORKDIR /app
-COPY worker.py evaluator.py ./
+COPY worker.py evaluator.py jsonlog.py ./
 
 # -u: unbuffered stdout so logs reach CloudWatch as they happen, not when
 # the buffer flushes (which for a crashed task is never).
