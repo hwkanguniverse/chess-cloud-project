@@ -336,17 +336,22 @@ def main():
     )
 
     while not _stop:
-        # Ten at a time. Games are seconds of work each, so fetching one per
-        # round trip would spend a real fraction of the time on SQS polling.
+        # One at a time, so each game's visibility timeout starts when that
+        # game does. A batch starts every timeout at the receive: ten games at
+        # a measured median of 53 s need ~530 s against a 300 s timeout, so the
+        # tail of each batch reappeared and a second task evaluated it too -
+        # 36 of 200 games done twice, each reappearance a receive counting
+        # toward the DLQ. One extra poll per game is noise beside the engine.
         response = sqs.receive_message(
             QueueUrl=QUEUE_URL,
-            MaxNumberOfMessages=10,
+            MaxNumberOfMessages=1,
             WaitTimeSeconds=20,
         )
         for message in response.get("Messages", []):
             if _stop:
-                # The rest of the batch stays invisible until the visibility
-                # timeout returns it, then another task picks it up.
+                # SIGTERM landed during the long poll. The message stays
+                # invisible until the visibility timeout returns it, then
+                # another task picks it up.
                 break
             # pk as well as sk: sk alone is GAME#<month>#<id> and does not
             # say whose game it is. requestedBy is the Cognito sub, so a
