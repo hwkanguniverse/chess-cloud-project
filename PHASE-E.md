@@ -4,7 +4,7 @@
 
 **One item deliberately not built:** closing the account-registration hole under the rate limit. Accounts are free, so the token bucket bounds an account rather than spend — stated in full below, with the options if it ever matters. Nothing is hosted yet, so nobody can farm accounts against it.
 
-**One fix deployed but not drilled live:** the per-player claim that stops a duplicate `/analyse` re-queueing an in-flight run. The failure was drilled and measured; the fix has not been watched working, because every player in the table is now fully evaluated and never reaches the claim. A third player would exercise it.
+**The per-player claim was drilled live in Phase 4 (25 Sep 2026)** — a second `/analyse` of Hikaru returned `queued: 0, alreadyQueued: 200`. It works, but the same run found duplicate evaluations from a different cause (the evaluator's batch outliving its visibility timeout), so "17 evaluated twice" below was likely not all the double request's doing. See [CLAUDE.md](CLAUDE.md).
 
 **Goal:** make "analysed" mean *evaluated*. Phase 3 made it mean *counted* — games, W/D/L, colours, time controls, ratings — a real aggregate a dashboard can render, deliberately shipped without an engine. This phase adds the engine that makes this a chess project rather than an ingestion pipeline.
 

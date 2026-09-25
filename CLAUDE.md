@@ -10,7 +10,7 @@ Previous phases: [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PHASE-3.md
 
 **Two things are owed from earlier phases and are not this phase's work:**
 - **Phase F's hosting is still blocked on choosing a domain** — CORS, the browser drills and the public launch all wait behind it. Still the longest-standing open item in the project.
-- **Phase E's per-player claim is deployed but never drilled live.** Every stored player is fully evaluated, so nothing reaches the claim. A third player would exercise it.
+- ~~**Phase E's per-player claim is deployed but never drilled live.**~~ **Drilled 25 Sep:** Hikaru's new September games reached it, and a second `/analyse` six seconds after the first returned `queued: 0, alreadyQueued: 200`. See the finding below — the claim works, but it does not close the duplicates Phase E attributed to it.
 
 Account: `961868442307` · Region: `ap-southeast-1` · IAM user: `terraform-admin` (MFA enabled)
 
@@ -73,6 +73,7 @@ Each of these has a real trade-off and a real price.
 
 - [x] **Structured JSON logs — worth the rewrite, or not?** *Decided: JSON everywhere — see the decision log.* The skill lists them. They make lines filterable and metric-filterable, which is what everything else in this phase depends on. The cost is touching all 19 call sites and losing human-readable output when tailing. **Options: JSON everywhere; JSON in the workers only; keep prose and parse it with metric filters.**
 - [x] **Request IDs: how far do they need to travel?** *Decided: across the queue — see the decision log.* A request ID is cheap inside one Lambda and real work across an SQS fan-out — it has to ride in the message body and be logged by the worker. Worth deciding whether the goal is per-Lambda correlation or genuine end-to-end tracing.
+- [ ] **The evaluator's batch outlives its visibility timeout — fix it, and how?** *Found 25 Sep by the request-ID drill.* Each task receives 10 messages and evaluates them serially; games measured **median 53 s, p90 84 s, max 107 s** (Hikaru, 55 games), so a batch needs ~530 s against a **300 s** visibility timeout. The tail of every batch reappears and another task takes it while the first is still busy with earlier games — the worker's `evalDepth` guard misses because the game is not finished anywhere yet. **Result: 236 evaluations for 200 games — 36 done twice (~18% wasted Fargate), 7 more caught by the guard.** DLQ stayed at 0 this run, but each reappearance is a receive, and `maxReceiveCount = 3` means a game can reach the DLQ having never failed. **This also revises Phase E:** its "17 evaluated twice" was attributed to the double `/analyse`, and the claim was said to close both doors — today the claim held and duplicates happened anyway. **Options: `MaxNumberOfMessages=1` (one poll per ~53 s game, negligible); raise the visibility timeout to ~20 min (crashed tasks' games wait that long to retry); extend visibility per message before processing (correct, more code).**
 - [ ] **Which alarm actually gets built first?** The skill's requirement is "an alarm that demonstrably fires". The DLQ alarm is the obvious candidate: it is the only current failure mode with no human in the loop. **Cost: an SNS topic and email, both ~$0.**
 - [ ] **X-Ray: yes or no?** The skill lists it. It costs per trace beyond the free tier, and this project's slow path is a *queue wait*, not a call graph — the thing X-Ray is best at showing is the thing Phase 3 already measured by hand. **Name the question it answers that CloudWatch cannot**, or cut it.
 - [ ] **Dashboard: one, or none?** A CloudWatch dashboard is $3/month beyond the first three — real money at this budget. Decide whether the audience is me during a drill (logs are better) or a portfolio screenshot (a dashboard is better).
@@ -82,7 +83,7 @@ Each of these has a real trade-off and a real price.
 Ordered so each piece is verifiable before the next depends on it.
 
 - [x] **Structured logging**, in whatever form is decided above, with the existing useful lines preserved rather than replaced. *Seen live in all three places — ingestion (`fetch_start` → `archive_unchanged`), evaluator (`game_already_evaluated`), and a Lambda (`requestId` on app lines, `platform.report` as JSON). Not yet seen live: the `message_failed` path and link's `lichess_exchange_failed`; the DLQ drill will exercise the former.*
-- [ ] **Request IDs threaded through** the paths that fan out, so one submit can be followed across services.
+- [x] **Request IDs threaded through** the paths that fan out, so one submit can be followed across services. *Drilled live 25 Sep — see the failure paths below.*
 - [ ] **A metric filter** turning a log pattern into a number — the SOA-shaped skill this phase is for.
 - [ ] **At least one alarm that demonstrably fires**, wired to something that reaches me. The skill's wording is deliberate: an alarm nobody has seen fire is an assertion, not a control.
 - [ ] **`check-drift.sh` extended** to assert whatever this phase decides is load-bearing — most likely the DLQ alarm's existence, since an unnoticed DLQ is the failure this phase is for.
@@ -102,7 +103,7 @@ Carried forward because the temptation to revisit them does not go away.
 Same standard as every prior phase: watched live, not asserted. Phase E recorded four bugs that hid behind healthy status, and Phase 6 found that the most dangerous failures are the ones that look like success.
 
 - [ ] **The alarm fires for real** → not simulated with `set-alarm-state`. Put a message in the DLQ and watch the notification arrive.
-- [ ] **A request is followed end to end** → pick one submit, find every line it produced across both services, and confirm the correlation actually works.
+- [x] **A request is followed end to end** → pick one submit, find every line it produced across both services, and confirm the correlation actually works. *Done 25 Sep with a real authenticated token.* Submit `d00fc6f2…` → `submit_queued` (1 month) → worker `fetch_start` + `archive_done`, same ID. Analyse `2ad302fb…` → `analyse_queued` (200) → **all 236 `game_done` and 7 `game_already_evaluated` lines across 8 evaluator tasks carry it**. A second analyse `d57dd8ef…` logged `analyse_already_queued` and appears on **zero** worker lines — correct, since it queued nothing. The only lines without an ID are per-task lifecycle lines (`evaluator_up`, `evaluator_exit`), which belong to no request.
 - [ ] **The logs answer a question they could not answer before** → the test of whether this phase did anything.
 
 ## Cost controls
