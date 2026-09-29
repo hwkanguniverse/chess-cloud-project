@@ -334,6 +334,24 @@ resource "aws_cloudwatch_log_group" "players" {
 # worker's job, and keeping SendMessage the only queue permission here is
 # also what keeps redrive the only real path into the DLQ.
 
+# X-Ray: every function traced, so a slow request splits into cold start,
+# handler time and Lambda's own overhead. The question it answers: /player
+# averaged 4.1 s over 30 days with a 24 s worst against a 25 s timeout, and
+# analyse hit its 20 s timeout at least once - the REPORT line gives only the
+# total. Tracing alone needs no code or packaging change; timing each DynamoDB
+# call would need the X-Ray SDK, which breaks the single-file zips, so that is
+# deferred until the traces show the handler itself is the slow part.
+#
+# ~$0: the free tier is 100k traces a month, and this API serves about 1k.
+# X-Ray has no resource-level permissions, hence "*".
+locals {
+  xray_write = {
+    Effect   = "Allow"
+    Action   = ["xray:PutTraceSegments", "xray:PutTelemetryRecords"]
+    Resource = "*"
+  }
+}
+
 data "aws_iam_policy_document" "lambda_assume" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -390,6 +408,7 @@ resource "aws_iam_role_policy" "analyse" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.analyse.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -439,6 +458,7 @@ resource "aws_iam_role_policy" "submit" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.submit.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -475,6 +495,7 @@ resource "aws_iam_role_policy" "link" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.link.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -504,6 +525,7 @@ resource "aws_iam_role_policy" "player" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.player.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -539,6 +561,7 @@ resource "aws_iam_role_policy" "players" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.players.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -569,6 +592,7 @@ resource "aws_iam_role_policy" "status" {
         Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
         Resource = "${aws_cloudwatch_log_group.status.arn}:*"
       },
+      local.xray_write,
     ]
   })
 }
@@ -593,6 +617,9 @@ resource "aws_lambda_function" "analyse" {
     log_format            = "JSON"
     application_log_level = "INFO"
     system_log_level      = "INFO"
+  }
+  tracing_config {
+    mode = "Active"
   }
   # Paginates a player's games and fans out up to 400 messages in batches of
   # ten. Still no outbound HTTP, but more work than a read handler - sized
@@ -633,6 +660,9 @@ resource "aws_lambda_function" "submit" {
     application_log_level = "INFO"
     system_log_level      = "INFO"
   }
+  tracing_config {
+    mode = "Active"
+  }
   timeout = var.submit_timeout
 
   environment {
@@ -667,6 +697,9 @@ resource "aws_lambda_function" "link" {
     application_log_level = "INFO"
     system_log_level      = "INFO"
   }
+  tracing_config {
+    mode = "Active"
+  }
   # Longer than the others: this one makes two outbound calls to lichess.org
   # (token exchange, then account lookup) and a slow upstream should fail the
   # request rather than the function.
@@ -700,6 +733,9 @@ resource "aws_lambda_function" "player" {
     log_format            = "JSON"
     application_log_level = "INFO"
     system_log_level      = "INFO"
+  }
+  tracing_config {
+    mode = "Active"
   }
   # Not var.lambda_timeout: that is sized for one DynamoDB call, and this
   # route now paginates a second Query across the player's whole game
@@ -738,6 +774,9 @@ resource "aws_lambda_function" "players" {
     application_log_level = "INFO"
     system_log_level      = "INFO"
   }
+  tracing_config {
+    mode = "Active"
+  }
   # Longer than the other reads: a Scan pages through the entire table, and
   # while that is fast at the current size it is the one read whose duration
   # grows with everything ever ingested rather than with what it returns.
@@ -766,6 +805,9 @@ resource "aws_lambda_function" "status" {
     log_format            = "JSON"
     application_log_level = "INFO"
     system_log_level      = "INFO"
+  }
+  tracing_config {
+    mode = "Active"
   }
   timeout = var.lambda_timeout
 
