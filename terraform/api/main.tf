@@ -135,6 +135,15 @@ data "terraform_remote_state" "queue" {
   }
 }
 
+data "terraform_remote_state" "guardrails" {
+  backend = "s3"
+  config = {
+    bucket = "chess-cloud-tfstate-961868442307"
+    key    = "guardrails/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
 data "terraform_remote_state" "auth" {
   backend = "s3"
   config = {
@@ -1095,6 +1104,44 @@ resource "aws_lambda_permission" "players" {
   function_name = aws_lambda_function.players.function_name
   principal     = "apigateway.amazonaws.com"
   source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
+}
+
+# --- Errors alarm -----------------------------------------------------------
+
+# A request that crashed or timed out. Found by X-Ray's first look: analyse
+# had hit its 20 s timeout and nothing said so - the user got a 500 and the
+# only record was a REPORT line nobody reads.
+#
+# Lambda's account-wide Errors, with no FunctionName dimension: one alarm and
+# one metric covers every function, stays inside the free ten, and a function
+# added later is covered without touching this. The email does not name the
+# function; the logs do. Every Lambda in this account is this project's.
+#
+# The query in the description was wrong the first time and only the drill
+# showed it: the runtime logs an unhandled exception under `log_level`, not the
+# `level` the app's own lines use, and in JSON format a timeout is not the
+# "Task timed out" text but `status: timeout` on platform.report - while a
+# crash's report says `status: success`. Hence all three terms.
+#
+# Counts unhandled exceptions and timeouts. Deliberately not counted: the
+# handled 502/503s that submit and link return when Chess.com or Lichess is
+# down - an upstream outage is not something to act on at 2am.
+resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
+  alarm_name          = "chess-cloud-lambda-errors"
+  alarm_description   = "A Lambda crashed or timed out. Find which - Logs Insights over /aws/lambda/chess-cloud-*: filter log_level = 'ERROR' or level = 'ERROR' or record.status in ['timeout', 'error', 'failure']"
+  namespace           = "AWS/Lambda"
+  metric_name         = "Errors"
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+
+  # No invocations publishes nothing, which is the normal state.
+  treat_missing_data = "notBreaching"
+
+  alarm_actions = [data.terraform_remote_state.guardrails.outputs.alerts_topic_arn]
+  ok_actions    = [data.terraform_remote_state.guardrails.outputs.alerts_topic_arn]
 }
 
 output "api_endpoint" {
