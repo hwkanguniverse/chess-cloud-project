@@ -232,6 +232,11 @@ def evaluate_game(engine, pgn_text, colour):
 
 def process(message):
     """Evaluate one game and write the result onto its item."""
+    # Timed from here, not from the engine starting, because the visibility
+    # timeout started at the receive a moment ago. duration_s is what a metric
+    # filter compares against that 300 s: a game that outlives it is handed to
+    # a second task and evaluated twice, which fails nowhere and shows nowhere.
+    started = time.monotonic()
     body = json.loads(message["Body"])
     pk = body["pk"]
     sk = body["sk"]
@@ -307,6 +312,7 @@ def process(message):
             "sk": sk,
             "acpl": result["acpl"],
             "blunders": result["blunders"],
+            "duration_s": round(time.monotonic() - started, 1),
         },
     )
 

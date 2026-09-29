@@ -110,6 +110,15 @@ data "terraform_remote_state" "queue" {
   }
 }
 
+data "terraform_remote_state" "guardrails" {
+  backend = "s3"
+  config = {
+    bucket = "chess-cloud-tfstate-961868442307"
+    key    = "guardrails/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
 data "terraform_remote_state" "network" {
   backend = "s3"
   config = {
@@ -533,6 +542,51 @@ variable "eval_depth" {
 resource "aws_cloudwatch_log_group" "evaluator" {
   name              = "/ecs/chess-cloud-evaluator"
   retention_in_days = 14
+}
+
+# --- Game duration: the metric filter --------------------------------------
+
+# Answers "is any game getting close to its visibility timeout?". The clock
+# starts at the receive; a game that outlives it reappears, a second task
+# evaluates it too, and nothing fails - the 25 Sep drill found 36 of 200 games
+# done twice this way with every component reporting success. One message per
+# receive fixed the batching cause, but a single slow game would still do it.
+# Measured max so far is 149 s against 300.
+#
+# Filters on $.event, not the prose, so rewording the message cannot flatline
+# the metric. A custom metric, billed only for the hours it receives data -
+# cents a month at a few runs a week.
+resource "aws_cloudwatch_log_metric_filter" "game_duration" {
+  name           = "chess-cloud-game-duration"
+  log_group_name = aws_cloudwatch_log_group.evaluator.name
+  pattern        = "{ $.event = \"game_done\" }"
+
+  metric_transformation {
+    name      = "GameDurationSeconds"
+    namespace = "ChessCloud"
+    value     = "$.duration_s"
+    unit      = "Seconds"
+  }
+}
+
+# Fires at 80% of the timeout: late enough that normal games never trip it,
+# early enough to act before duplicates start. Maximum, because one slow game
+# is the failure - an average would hide it among fifty fast ones.
+resource "aws_cloudwatch_metric_alarm" "game_near_timeout" {
+  alarm_name          = "chess-cloud-game-near-visibility-timeout"
+  alarm_description   = "A game took over 80% of the evaluation queue's visibility timeout. Past 100% it is evaluated twice, silently."
+  namespace           = "ChessCloud"
+  metric_name         = aws_cloudwatch_log_metric_filter.game_duration.metric_transformation[0].name
+  statistic           = "Maximum"
+  period              = 60
+  evaluation_periods  = 1
+  threshold           = 0.8 * data.terraform_remote_state.queue.outputs.eval_visibility_timeout_seconds
+  comparison_operator = "GreaterThanThreshold"
+
+  # No data means no games running, which is the normal state.
+  treat_missing_data = "notBreaching"
+
+  alarm_actions = [data.terraform_remote_state.guardrails.outputs.alerts_topic_arn]
 }
 
 resource "aws_iam_role" "evaluator_task" {

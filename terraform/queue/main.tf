@@ -125,6 +125,12 @@ resource "aws_sqs_queue_redrive_allow_policy" "analysis_dlq" {
 # table and runs a local binary, so it makes no upstream requests and scales
 # freely. Sharing one queue would force the stricter limit on both.
 
+locals {
+  # Output as well, because the worker root's game-duration alarm is a
+  # fraction of it - raise this and that alarm follows.
+  eval_visibility_timeout_seconds = 300
+}
+
 resource "aws_sqs_queue" "evaluation_dlq" {
   name                      = "${var.queue_name}-eval-dlq"
   message_retention_seconds = 1209600
@@ -140,7 +146,7 @@ resource "aws_sqs_queue" "evaluation" {
   # a retry cost hours of Fargate, and a task killed mid-job left a message
   # invisible until the following morning. Per game, all three shrink to
   # roughly a minute.
-  visibility_timeout_seconds = 300
+  visibility_timeout_seconds = local.eval_visibility_timeout_seconds
 
   receive_wait_time_seconds = 20
   message_retention_seconds = 345600
@@ -163,6 +169,60 @@ resource "aws_sqs_queue_redrive_allow_policy" "evaluation_dlq" {
   })
 }
 
+# --- DLQ alarms -------------------------------------------------------------
+
+# The only failure in this app with nobody watching: a message that failed
+# every retry sits here for 14 days and then expires, and the user just sees
+# a run that never finished. These are the first alarms that notify a person
+# rather than move a task count.
+#
+# The native SQS metric rather than a metric filter on `message_failed`:
+# a failed attempt is usually retried successfully, so alarming on attempts
+# would page on failures that fix themselves. A message in the DLQ has given up.
+#
+# Slow by nature - three receives' worth of visibility timeouts, then SQS's
+# roughly five-minute metric publishing - which is fine for "something died
+# and nobody noticed". Free: SQS metrics cost nothing and these sit inside
+# the ten free alarms.
+
+data "terraform_remote_state" "guardrails" {
+  backend = "s3"
+  config = {
+    bucket = "chess-cloud-tfstate-961868442307"
+    key    = "guardrails/terraform.tfstate"
+    region = "ap-southeast-1"
+  }
+}
+
+locals {
+  dlqs = {
+    analysis   = aws_sqs_queue.analysis_dlq.name
+    evaluation = aws_sqs_queue.evaluation_dlq.name
+  }
+}
+
+resource "aws_cloudwatch_metric_alarm" "dlq_not_empty" {
+  for_each = local.dlqs
+
+  alarm_name          = "${each.value}-not-empty"
+  alarm_description   = "A ${each.key} message failed every retry and is sitting in ${each.value}. Its body carries the requestId that queued it."
+  namespace           = "AWS/SQS"
+  metric_name         = "ApproximateNumberOfMessagesVisible"
+  dimensions          = { QueueName = each.value }
+  statistic           = "Maximum"
+  period              = 300
+  evaluation_periods  = 1
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+
+  # An idle queue stops publishing, and idle is the healthy state here.
+  treat_missing_data = "notBreaching"
+
+  # OK too, so the drained DLQ is confirmed by email rather than assumed.
+  alarm_actions = [data.terraform_remote_state.guardrails.outputs.alerts_topic_arn]
+  ok_actions    = [data.terraform_remote_state.guardrails.outputs.alerts_topic_arn]
+}
+
 output "eval_queue_url" {
   value = aws_sqs_queue.evaluation.url
 }
@@ -170,6 +230,10 @@ output "eval_queue_url" {
 output "eval_queue_arn" {
   description = "For scoping the analyse Lambda's send and the evaluator's receive/delete."
   value       = aws_sqs_queue.evaluation.arn
+}
+
+output "eval_visibility_timeout_seconds" {
+  value = local.eval_visibility_timeout_seconds
 }
 
 output "eval_dlq_url" {

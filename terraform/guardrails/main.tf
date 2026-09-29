@@ -100,6 +100,30 @@ resource "aws_budgets_budget" "monthly" {
   }
 }
 
+# --- Operational alerts -----------------------------------------------------
+
+# Where "something is wrong" alarms go, as opposed to the scaling alarms,
+# which exist to move task counts and notify nobody. Lives here rather than
+# beside any one alarm because it is shared: the queue root alarms on the DLQs,
+# the worker root on game duration, and both read this ARN from remote state.
+#
+# The email subscription is created pending. AWS sends a confirmation link,
+# and until it is clicked every notification is silently dropped - the alarm
+# goes to ALARM and nothing arrives. The drift check asserts it is confirmed.
+resource "aws_sns_topic" "alerts" {
+  name = "chess-cloud-alerts"
+}
+
+resource "aws_sns_topic_subscription" "alerts_email" {
+  topic_arn = aws_sns_topic.alerts.arn
+  protocol  = "email"
+  endpoint  = var.alert_email
+}
+
 output "budget_name" {
   value = aws_budgets_budget.monthly.name
+}
+
+output "alerts_topic_arn" {
+  value = aws_sns_topic.alerts.arn
 }
