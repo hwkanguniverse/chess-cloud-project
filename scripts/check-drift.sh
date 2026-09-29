@@ -165,30 +165,36 @@ FC=$(aws budgets describe-notifications-for-budget \
 
 # The DLQ must exist and be wired up. A queue whose redrive policy is missing
 # looks identical to a working one until a poison message arrives.
-echo "SQS dead letter queue:"
-QURL=$(aws sqs get-queue-url --queue-name chess-cloud-analysis --region "$REGION" \
-  --query QueueUrl --output text 2>/dev/null)
-if [ -z "$QURL" ] || [ "$QURL" = "None" ]; then
-  ok "queue not created yet"
-else
+#
+# Both queues, each with its own DLQ. Until Phase 4 this checked only the
+# ingestion one - the evaluation DLQ had never been looked at by anything.
+for Q in chess-cloud-analysis chess-cloud-analysis-eval; do
+  echo "SQS dead letter queue ($Q):"
+  QURL=$(aws sqs get-queue-url --queue-name "$Q" --region "$REGION" \
+    --query QueueUrl --output text 2>/dev/null)
+  if [ -z "$QURL" ] || [ "$QURL" = "None" ]; then
+    ok "queue not created yet"
+    continue
+  fi
   RD=$(aws sqs get-queue-attributes --queue-url "$QURL" --region "$REGION" \
     --attribute-names RedrivePolicy --query 'Attributes.RedrivePolicy' --output text 2>/dev/null)
   case "$RD" in
     *deadLetterTargetArn*) ok "redrive policy set" ;;
-    *)                     flag "main queue has no redrive policy - failures would retry forever" ;;
+    *)                     flag "$Q has no redrive policy - failures would retry forever" ;;
   esac
 
-  # Messages here mean games failed every retry. Not drift, but nothing else
-  # surfaces it and an unnoticed DLQ is the same as no DLQ.
+  # Messages here mean work failed every retry. Not drift - the alarm below is
+  # what reports it - but printed so a run of this script shows it too.
   #
   # This polls rather than reading ApproximateNumberOfMessages, which lags -
   # observed reporting 0 for a DLQ that held a message, and 1 for one already
   # empty. A check that reports "all clear" when it is not is worse than a
   # slow one. Costs ~5s when empty.
   #
-  # visibility-timeout 0 keeps anything found immediately available to the real
-  # worker, and nothing is ever deleted - this only looks.
-  DURL=$(aws sqs get-queue-url --queue-name chess-cloud-analysis-dlq --region "$REGION" \
+  # visibility-timeout 0 leaves anything found where it was, and nothing is
+  # ever deleted - this only looks.
+  DLQ="$Q-dlq"
+  DURL=$(aws sqs get-queue-url --queue-name "$DLQ" --region "$REGION" \
     --query QueueUrl --output text 2>/dev/null)
   if [ -n "$DURL" ] && [ "$DURL" != "None" ]; then
     BODY=$(aws sqs receive-message --queue-url "$DURL" --region "$REGION" \
@@ -197,10 +203,37 @@ else
     if [ -z "$BODY" ] || [ "$BODY" = "None" ]; then
       ok "dlq empty"
     else
-      echo "  NOTE: message(s) in the DLQ - these failed every retry: $BODY"
+      echo "  NOTE: message(s) in $DLQ - these failed every retry: $BODY"
     fi
   fi
-fi
+
+  # The alarm is the load-bearing part of Phase 4: it is what turns a dead
+  # message into an email instead of a silent 14-day expiry. Checked link by
+  # link along the path an alert travels, because each link fails silently -
+  # a missing alarm, actions disabled (left over from a drill), an action
+  # pointing at the wrong topic, or a subscription never confirmed all leave
+  # the alarm free to fire into nothing.
+  ALARM="$DLQ-not-empty"
+  read -r ENABLED TOPIC <<<"$(aws cloudwatch describe-alarms --alarm-names "$ALARM" \
+    --region "$REGION" --query 'MetricAlarms[0].[ActionsEnabled,AlarmActions[0]]' \
+    --output text 2>/dev/null)"
+  if [ -z "$ENABLED" ] || [ "$ENABLED" = "None" ]; then
+    flag "no alarm $ALARM - a dead message would sit unnoticed until it expires"
+    continue
+  fi
+  [ "$ENABLED" = "True" ] && ok "alarm exists, actions enabled" \
+    || flag "$ALARM has actions disabled - it can go to ALARM and tell no one"
+  case "$TOPIC" in
+    arn:aws:sns:*) ;;
+    *) flag "$ALARM has no SNS action - it notifies no one"; continue ;;
+  esac
+  CONFIRMED=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --region "$REGION" \
+    --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" \
+    --output text 2>/dev/null || echo 0)
+  [ "${CONFIRMED:-0}" != "0" ] && [ "$CONFIRMED" != "None" ] \
+    && ok "notifies ${TOPIC##*:}, $CONFIRMED confirmed subscription(s)" \
+    || flag "$ALARM notifies ${TOPIC##*:}, which has no confirmed subscription - alerts are dropped"
+done
 
 echo
 [ "$FAIL" = "0" ] && echo "No drift." || echo "Drift found - reconcile with the skill or log it in CLAUDE.md."

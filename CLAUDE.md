@@ -52,8 +52,8 @@ Stated first, because this phase is a retrofit and the gaps are specific rather 
 
 - **19 `print()` calls across the app.** No `logging`, no levels, no structure. They are genuinely useful lines — `fetching … (conditional)`, `done GAME#…: acpl=163 blunders=9` — but they are prose, so nothing can filter, count or alarm on them.
 - **No request IDs anywhere.** Two requests fan out, one queue hop each: submit → ~22 month messages → ingestion, and analyse → ~200 game messages → evaluator. Nothing chains across both services. Nothing ties a worker's log lines back to the request that caused them.
-- **Every alarm is a scaling alarm.** Four exist — `queue-has-work`, `queue-empty`, and the evaluator's pair. All of them exist to *move task counts*. **Not one of them tells you something is wrong.**
-- **The DLQ has no alarm.** `check-drift.sh` polls it, but only when run by hand. A message can sit there indefinitely.
+- ~~**Every alarm is a scaling alarm.**~~ *Fixed 29 Sep — the DLQ and game-duration alarms notify by email.* Four exist — `queue-has-work`, `queue-empty`, and the evaluator's pair. All of them exist to *move task counts*. **Not one of them tells you something is wrong.**
+- ~~**The DLQ has no alarm.**~~ *Fixed 29 Sep — both DLQs alarm, drilled live.* `check-drift.sh` polls it, but only when run by hand. A message can sit there indefinitely.
 - **Log retention is 14 days** on every project group, which is deliberate and fine.
 - **There is a stray `/aws/lambda/my-s3-function` log group with no retention set** — not from this project, not in Terraform. A leftover from console experimentation, and a small live example of the undeclared state Phase 6 was about.
 
@@ -86,7 +86,7 @@ Ordered so each piece is verifiable before the next depends on it.
 - [x] **Request IDs threaded through** the paths that fan out, so one submit can be followed across services. *Drilled live 25 Sep — see the failure paths below.*
 - [ ] **A metric filter** turning a log pattern into a number — the SOA-shaped skill this phase is for. *Built 29 Sep: `game_done` → `ChessCloud/GameDurationSeconds`, alarm above 240 s. Image with `duration_s` pushed and verified. **Not ticked until a real run shows data points** — a filter that has never matched is the prose-coupling failure JSON was meant to prevent.*
 - [x] **At least one alarm that demonstrably fires**, wired to something that reaches me. The skill's wording is deliberate: an alarm nobody has seen fire is an assertion, not a control. *Both DLQ alarms → SNS `chess-cloud-alerts` → email. The analysis one fired and cleared live 29 Sep, and both emails arrived — see the drill below.*
-- [ ] **`check-drift.sh` extended** to assert whatever this phase decides is load-bearing — most likely the DLQ alarm's existence, since an unnoticed DLQ is the failure this phase is for.
+- [x] **`check-drift.sh` extended** to assert whatever this phase decides is load-bearing — most likely the DLQ alarm's existence, since an unnoticed DLQ is the failure this phase is for. *Done 29 Sep. Both queues now (the eval DLQ had never been checked), and per DLQ the whole alert path: alarm exists → actions enabled → SNS action → topic has a confirmed subscription. Each link fails silently on its own. **Seen red:** disabling the eval alarm's actions gave DRIFT and exit 1; the subscription query returned 0 against an empty topic. Not drilled: a missing alarm (same branch as `describe-alarms` returning nothing).*
 - [ ] **Delete the stray `my-s3-function` log group**, or adopt it into Terraform. It is undeclared state, and Phase 6's whole argument was that undeclared state should not exist.
 
 ## What must not change
