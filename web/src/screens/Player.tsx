@@ -605,9 +605,8 @@ function Evaluation({
 
       {/* Games that will never be evaluated are stated rather than left as an
           unexplained gap between the game count and the evaluated count. */}
-      {/* Suppressed when the count is partial: selection stopped before
-          reaching most of a prolific player's history, so "0 daily games not
-          evaluated" would be false and "188" would be an arbitrary fraction. */}
+      {/* Suppressed if the API flags the count as partial. It no longer
+          does - `excluded` is now exact - but the guard is harmless. */}
       {excludedTotal > 0 && !excludedPartial && (
         <p className="muted small">
           {Object.entries(excluded)

@@ -41,8 +41,8 @@ USERNAME_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 # incremented by up to eight evaluators at once, breaking the recompute-never-
 # accumulate rule that makes redelivery free.
 #
-# So it is computed here, from the same projected Query that analyse.py
-# already runs to decide what to queue. It cannot drift from the game items
+# So it is computed here, from the same by-class index query that analyse.py
+# runs to decide what to queue. It cannot drift from the game items
 # because it *is* the game items.
 DEPTH = int(os.environ.get("EVAL_DEPTH", "18"))
 
@@ -79,67 +79,66 @@ def _response(status, body):
     }
 
 
-def evaluation_state(pk):
+def newest_per_class(pk):
+    """The newest GAMES_PER_CLASS games in each evaluable class, from the
+    by-class index. Must stay identical to analyse.py's selection.
+
+    One Query per class, each a single page: 100 index entries of ~100 bytes
+    is far under the 1 MB page limit, so Limit alone bounds the read. This
+    used to be a walk over the player's games until the *rarest* class reached
+    100 - 22 of 28 pages for a player with 778 blitz games in 10,865, and the
+    whole history for anyone with fewer than 100 in any class.
+    """
+    games = {}
+    for klass in sorted(EVAL_CLASSES):
+        page = table.query(
+            IndexName="by-class",
+            KeyConditionExpression=Key("classKey").eq(f"{pk}#{klass}"),
+            ScanIndexForward=False,  # SK leads with the month: newest first
+            Limit=GAMES_PER_CLASS,
+            ProjectionExpression="SK, evalDepth",
+        )
+        if page.get("Items"):
+            games[klass] = page["Items"]
+    return games
+
+
+def evaluation_state(pk, months):
     """What has been evaluated for this player, derived from the game items.
 
-    Mirrors analyse.py's selection deliberately: newest-first, the same
-    per-class cap, the same excluded controls. The point is that `outstanding`
-    here equals what a POST /analyse would queue right now - if the two rules
+    Mirrors analyse.py's selection deliberately: the same newest-first
+    per-class cap over the same index. The point is that `outstanding` here
+    equals what a POST /analyse would queue right now - if the two rules
     drifted, this route would show work pending that nothing will ever pick up.
 
-    Reads only SK, class and evalDepth. The PGN is ~3KB per game and the evals
-    array is larger still; projecting both away is what keeps this proportional
-    to games rather than to bytes of chess.
+    `excluded` comes from the month summaries, not the games: they already
+    count games per class, so it is exact over the player's whole history.
+    It used to be counted during the walk and was partial whenever the walk
+    stopped early, which is what `excludedPartial` flagged - now never sent.
 
     Returns evaluated/outstanding/excluded counts plus per-class detail, and
     `inScope` - the denominator a progress bar needs, since it is capped and so
     is not the player's total game count.
     """
-    per_class = {}
     evaluated = 0
     outstanding = 0
-    excluded = {}
-    capped = False
-
-    kwargs = {
-        "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
-        "ScanIndexForward": False,
-        "ProjectionExpression": "SK, #c, evalDepth",
-        "ExpressionAttributeNames": {"#c": "class"},
-    }
-    while True:
-        page = table.query(**kwargs)
-        for item in page.get("Items", []):
-            klass = item.get("class") or "unknown"
-
-            if klass not in EVAL_CLASSES:
-                excluded[klass] = excluded.get(klass, 0) + 1
-                continue
-
-            seen = per_class.get(klass, 0)
-            if seen >= GAMES_PER_CLASS:
-                continue
-            per_class[klass] = seen + 1
-
+    per_class = {}
+    for klass, games in newest_per_class(pk).items():
+        per_class[klass] = len(games)
+        for game in games:
             # evalDepth is set on success *and* on an unparseable game, which
             # is what stops a broken PGN being re-queued forever. Both count
             # as done here: neither will be attempted again.
-            if item.get("evalDepth") == DEPTH:
+            if game.get("evalDepth") == DEPTH:
                 evaluated += 1
             else:
                 outstanding += 1
-        # Same early exit as analyse.py's selection, and for the same reason:
-        # once every class is full, the rest of the partition is older than
-        # everything already counted and cannot change the answer. Without it
-        # this route read all 70,344 of Hikaru's games on every page load and
-        # took 23 seconds against a 25s timeout.
-        if all(per_class.get(c, 0) >= GAMES_PER_CLASS for c in EVAL_CLASSES):
-            capped = True
-            break
 
-        if "LastEvaluatedKey" not in page:
-            break
-        kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    excluded = {}
+    for month in months:
+        for klass, n in ((month.get("summary") or {}).get("byClass") or {}).items():
+            if klass not in EVAL_CLASSES:
+                excluded[klass] = excluded.get(klass, 0) + int(n)
 
     return {
         "evaluated": evaluated,
@@ -147,9 +146,6 @@ def evaluation_state(pk):
         "inScope": evaluated + outstanding,
         "byClass": per_class,
         "excluded": excluded,
-        # Selection stopped early because every class was full, so `excluded`
-        # counts what was seen rather than the player's whole history.
-        "excludedPartial": capped,
         "depth": DEPTH,
     }
 
@@ -267,7 +263,7 @@ def handler(event, context):
             # only been ingested reports a truthful zero rather than the
             # client having to infer absence - which is the ambiguity this
             # whole thing exists to remove.
-            "evaluation": evaluation_state(f"PLAYER#{platform}#{username}"),
+            "evaluation": evaluation_state(f"PLAYER#{platform}#{username}", months),
             "months": months,
         },
     )

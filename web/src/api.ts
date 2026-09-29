@@ -127,9 +127,9 @@ export interface EvaluationState {
   byClass: Record<string, number>;
   excluded: Record<string, number>;
   /**
-   * True when selection stopped early because every time control was full, so
-   * `excluded` counts what was seen rather than the player's whole history. A
-   * prolific player's daily games may never be reached at all.
+   * No longer sent. It flagged `excluded` as partial when selection stopped
+   * early; `excluded` now comes from the month summaries and is always the
+   * player's whole history. Kept optional so an older API still type-checks.
    */
   excludedPartial?: boolean;
   depth: number;

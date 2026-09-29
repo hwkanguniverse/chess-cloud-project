@@ -84,9 +84,44 @@ resource "aws_dynamodb_table" "games" {
     type = "S"
   }
 
-  # No global secondary index, deliberately. Both access patterns are served by
-  # the primary key alone; a GSI on gameId would be eventually consistent, so a
-  # status poll immediately after submit could 404 on a game that exists.
+  attribute {
+    name = "classKey"
+    type = "S"
+  }
+
+  # No GSI on gameId, deliberately. Both lookup patterns are served by the
+  # primary key alone; a GSI would be eventually consistent, so a status poll
+  # immediately after submit could 404 on a game that exists.
+  #
+  # by-class is a different case: "a player's newest 100 games in one time
+  # control", which evaluation selection (analyse.py) and progress
+  # (player.py) both need. On the primary key that meant walking the player's
+  # games newest-first until the *rarest* class reached 100 - found by X-Ray
+  # on 29 Sep: 22 of 28 pages (~22 MB) for a player with 778 blitz games, and
+  # the whole history for anyone with fewer than 100 in any class. Here it is
+  # one Query with Limit 100 per class, whatever the history size.
+  #
+  # KEYS_ONLY plus evalDepth: ~100 bytes a game instead of the ~2.6 KB item
+  # (PGN and evals), because a Query pays for what it reads, not what it
+  # returns. Sparse by construction - only game items carry classKey.
+  #
+  # Eventually consistent is acceptable here, unlike for gameId: a game
+  # evaluated a second ago may read as outstanding, so progress lags by a
+  # second and at worst analyse re-queues it, which the evaluator's evalDepth
+  # guard already absorbs.
+  global_secondary_index {
+    name = "by-class"
+    key_schema {
+      attribute_name = "classKey"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "SK"
+      key_type       = "RANGE"
+    }
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["evalDepth"]
+  }
 
   # In-flight OAuth link attempts (SK = OAUTH#<state>) carry an expiresAt and
   # are swept by DynamoDB. This is what makes an abandoned link flow leave

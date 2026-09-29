@@ -280,8 +280,17 @@ def _caller_sub(event):
 def select_games(pk):
     """The last GAMES_PER_CLASS games per time control that still need evals.
 
-    Reads newest-first and stops adding to a control once it is full, so a
-    player with 65,000 blitz games is read but only 100 are kept.
+    One Query per evaluable class on the by-class index, newest first, Limit
+    GAMES_PER_CLASS - so a player with 65,000 blitz games reads 100 index
+    entries for blitz, not 65,000 games. Must stay identical to player.py's
+    newest_per_class, or progress would show work nothing will ever queue.
+
+    This was a walk over the player's games until every class was full, and
+    the walk is why this route once **timed out at 20 s** reading Hikaru's
+    70,344 games to select 300. Stopping early fixed Hikaru but not a player
+    who has ever played fewer than 100 games of one class: that class never
+    fills, so the walk read their whole history every time. The index has no
+    such case.
 
     Games already evaluated at this depth count towards the cap without being
     re-queued. That is what makes re-analysing nearly free, and it has to be
@@ -290,76 +299,58 @@ def select_games(pk):
     a per-player check would never pick those up. The same insight as the
     ETag, one layer down.
 
-    Stops as soon as every evaluable class is full. Games are newest-first, so
-    nothing beyond that point could be selected - and for a prolific player the
-    difference is decisive rather than merely faster: 70,344 games read to pick
-    300 exceeded the Lambda timeout.
-
-    Time controls outside EVAL_CLASSES are excluded before the cap is applied,
-    so excluding daily does not consume a slot that a blitz game could have
-    used. They are returned as their own count rather than folded into
-    `skipped`, which means something different: skipped games *are* evaluated,
-    excluded games never will be.
+    Time controls outside EVAL_CLASSES are never queried, so excluding daily
+    does not consume a slot that a blitz game could have used. They are
+    counted from the month summaries rather than folded into `skipped`, which
+    means something different: skipped games *are* evaluated, excluded games
+    never will be.
     """
     per_class = {}
     todo = []
     skipped = 0
-    excluded = {}
-    seen_any = False
-    # True when the walk stopped early because every class was full, which
-    # makes `excluded` a count of what was seen rather than the player's total.
-    capped = False
+    for klass in sorted(EVAL_CLASSES):
+        page = table.query(
+            IndexName="by-class",
+            KeyConditionExpression=Key("classKey").eq(f"{pk}#{klass}"),
+            ScanIndexForward=False,  # SK leads with the month: newest first
+            Limit=GAMES_PER_CLASS,
+            # The index holds keys and evalDepth only. No pgn - the worker
+            # reads that itself.
+            ProjectionExpression="SK, evalDepth",
+        )
+        items = page.get("Items", [])
+        if not items:
+            continue
+        per_class[klass] = len(items)
+        for item in items:
+            if item.get("evalDepth") == DEPTH:
+                skipped += 1
+            else:
+                todo.append(item["SK"])
 
+    # Out of scope by rule, not by cap. Counted separately so the response
+    # can say "26 daily games, deliberately not evaluated" rather than
+    # leaving them indistinguishable from games that simply have not been
+    # reached yet. From the month summaries, which already count games per
+    # class - exact over the whole history, and a few small items to read.
+    excluded = {}
     kwargs = {
-        "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("GAME#"),
-        "ScanIndexForward": False,  # newest archives first
-        # No pgn - the worker reads that itself. Pulling ~3KB per game here
-        # just to discard it would make selection the expensive half of a
-        # request that is meant to be cheap.
-        "ProjectionExpression": "SK, #c, evalDepth",
-        "ExpressionAttributeNames": {"#c": "class"},
+        "KeyConditionExpression": Key("PK").eq(pk) & Key("SK").begins_with("ARCHIVE#"),
+        "ProjectionExpression": "summary",
     }
     while True:
         page = table.query(**kwargs)
-        for item in page.get("Items", []):
-            seen_any = True
-            klass = item.get("class") or "unknown"
-
-            # Out of scope by rule, not by cap. Counted separately so the
-            # response can say "26 daily games, deliberately not evaluated"
-            # rather than leaving them indistinguishable from games that
-            # simply have not been reached yet.
-            if klass not in EVAL_CLASSES:
-                excluded[klass] = excluded.get(klass, 0) + 1
-                continue
-
-            seen = per_class.get(klass, 0)
-            if seen >= GAMES_PER_CLASS:
-                continue
-            per_class[klass] = seen + 1
-            if item.get("evalDepth") == DEPTH:
-                skipped += 1
-                continue
-            todo.append(item["SK"])
-        # Stop once every evaluable class has hit its cap. Reading on would
-        # change nothing: games are newest-first, so everything beyond this
-        # point is older than something already selected and could only be
-        # skipped.
-        #
-        # This is not an optimisation, it is the difference between working and
-        # not. Hikaru has 70,344 games; without this the Lambda read all of
-        # them to select 300 and **timed out at 20s**, returning a 500. The
-        # loop always stopped *adding* at the cap but kept *reading* to the end
-        # of the partition.
-        if all(per_class.get(c, 0) >= GAMES_PER_CLASS for c in EVAL_CLASSES):
-            capped = True
-            break
-
+        for month in page.get("Items", []):
+            by_class = (month.get("summary") or {}).get("byClass") or {}
+            for klass, n in by_class.items():
+                if klass not in EVAL_CLASSES:
+                    excluded[klass] = excluded.get(klass, 0) + int(n)
         if "LastEvaluatedKey" not in page:
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
 
-    return todo, skipped, per_class, excluded, seen_any, capped
+    seen_any = bool(per_class) or bool(excluded)
+    return todo, skipped, per_class, excluded, seen_any
 
 
 def fan_out(pk, sks, user_id, request_id):
@@ -415,7 +406,7 @@ def handler(event, context):
         return _response(400, {"error": "malformed username"})
 
     pk = f"PLAYER#{platform}#{username}"
-    todo, skipped, per_class, excluded, seen_any, capped = select_games(pk)
+    todo, skipped, per_class, excluded, seen_any = select_games(pk)
 
     # The player must already be ingested. Evaluation reads stored PGNs, so
     # asking to analyse a player nobody has fetched is a request for work that
@@ -516,15 +507,10 @@ def handler(event, context):
             # Not a saving and not a backlog: games that will never be
             # evaluated by design. Reported so a player whose history is
             # mostly correspondence gets an explanation rather than a
-            # suspiciously small queued count.
-            #
-            # `excludedPartial` says this is what was seen before selection
-            # stopped, not the player's total - the walk ends as soon as every
-            # class is full, so for a prolific player most of their history is
-            # never read. Reporting 188 as if it were a total would be a quiet
-            # lie about a number nobody could check.
+            # suspiciously small queued count. Exact over the whole history
+            # now that it comes from the month summaries - `excludedPartial`,
+            # which flagged a partial count, is no longer sent.
             "excluded": excluded,
-            **({"excludedPartial": True} if capped else {}),
             "statusUrl": f"/player/{platform}/{username}",
         },
     )

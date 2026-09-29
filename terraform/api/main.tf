@@ -400,7 +400,9 @@ resource "aws_iam_role_policy" "analyse" {
           "dynamodb:UpdateItem",
           "dynamodb:DeleteItem",
         ]
-        Resource = local.table_arn
+        # The index ARN is separate from the table's: a Query with IndexName
+        # against a policy naming only the table is denied.
+        Resource = [local.table_arn, "${local.table_arn}/index/by-class"]
       },
       {
         Effect = "Allow"
@@ -526,8 +528,10 @@ resource "aws_iam_role_policy" "player" {
         # Query, not GetItem: every month for a player shares one partition
         # key, so the whole history is a single Query against the primary key.
         # No Scan, and no index - the read this layout was chosen for.
-        Action   = ["dynamodb:Query"]
-        Resource = local.table_arn
+        Action = ["dynamodb:Query"]
+        # The index ARN is separate from the table's: a Query with IndexName
+        # against a policy naming only the table is denied.
+        Resource = [local.table_arn, "${local.table_arn}/index/by-class"]
       },
       {
         Effect   = "Allow"

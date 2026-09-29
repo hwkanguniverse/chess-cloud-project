@@ -277,7 +277,14 @@ def write_games(platform, username, archive, rows):
         for row in rows:
             sk = _game_sk(archive, row)
             written.add(sk)
-            batch.put_item(Item={"PK": pk, "SK": sk, **row})
+            # classKey is the partition key of the by-class index, which is
+            # how player.py and analyse.py find a player's newest 100 games in
+            # one time control without reading the rest. Without it, a player
+            # with 5 bullet games in 50,000 had their whole history read on
+            # every page load, because bullet never reached its cap. Must
+            # match scripts/backfill-class-key.py.
+            class_key = f"{pk}#{row.get('class') or 'unknown'}"
+            batch.put_item(Item={"PK": pk, "SK": sk, "classKey": class_key, **row})
 
     # Anything under this month's prefix that this fetch did not write is left
     # over from a previous one. Query for keys only - the games themselves are
