@@ -50,10 +50,22 @@ variable "region" {
   default     = "ap-southeast-1"
 }
 
+# The git commit that last changed app/worker/, which is also the image's tag.
+# CI computes it and builds that image before applying; a break-glass laptop
+# apply must pass the same value:
+#   export TF_VAR_image_tag=$(git log -1 --format=%H -- app/worker | cut -c1-12)
+# No default, deliberately. The old default was "latest", which let the task
+# definition run whatever was pushed last - Phase E evaluated a whole run
+# with a four-day-old image that way - and let a plan that forgot the tag
+# quietly point both services back at it.
 variable "image_tag" {
-  description = "Tag of the worker image to deploy from ECR."
+  description = "Git SHA of the worker image to deploy - the last commit touching app/worker/."
   type        = string
-  default     = "latest"
+
+  validation {
+    condition     = can(regex("^[0-9a-f]{12}$", var.image_tag))
+    error_message = "image_tag must be a 12-character git SHA, not a moving tag like \"latest\"."
+  }
 }
 
 variable "chesscom_user_agent" {
@@ -149,8 +161,8 @@ locals {
 
 resource "aws_ecr_repository" "worker" {
   name                 = "chess-cloud-worker"
-  image_tag_mutability = "MUTABLE" # "latest" is re-pushed each build
-  force_delete         = true      # images are rebuildable artifacts, not data - destroy must not need a manual empty-the-repo step
+  image_tag_mutability = "IMMUTABLE" # a SHA tag names one image forever; nothing re-pushes one
+  force_delete         = true        # images are rebuildable artifacts, not data - destroy must not need a manual empty-the-repo step
 
   image_scanning_configuration {
     scan_on_push = true

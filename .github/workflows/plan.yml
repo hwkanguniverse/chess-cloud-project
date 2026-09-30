@@ -43,6 +43,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the image tag is read from history
+
+      # The worker root has no default tag, by design - see terraform/worker.
+      # The plan shows the tag the merge would deploy; the image itself is
+      # built only by apply.
+      - name: Worker image tag
+        run: echo "TF_VAR_image_tag=$(git log -1 --format=%H -- app/worker | cut -c1-12)" >> "$GITHUB_ENV"
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
