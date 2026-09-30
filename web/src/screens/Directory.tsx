@@ -61,8 +61,7 @@ export default function Directory() {
 
       {truncated && (
         <p className="notice warn">
-          This list is incomplete — the directory reads the whole table and hit
-          its page limit.
+          This list is incomplete — the directory hit its page limit.
         </p>
       )}
 
