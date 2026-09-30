@@ -205,6 +205,18 @@ variable "analyse_rate_refill_seconds" {
   default     = 3600
 }
 
+variable "analyse_daily_game_cap" {
+  description = <<-EOT
+    Games POST /analyse may queue per UTC day across every account - the
+    ceiling the per-account bucket cannot be, since accounts are free. Counted
+    in games because games are the cost: at ~$0.0003 each, 3,000 is ~$1/day
+    worst case, ~$30/month if hit every day. Decided 30 Sep 2026 as the
+    precondition for going public.
+  EOT
+  type        = number
+  default     = 3000
+}
+
 variable "analyse_claim_seconds" {
   description = <<-EOT
     How long one player's evaluation run is claimed for, so a second request
@@ -402,7 +414,8 @@ resource "aws_iam_role_policy" "analyse" {
         # in-flight claim. This route still writes no *game* data - the
         # evaluator owns the eval fields, and the route that asks for
         # evaluation has no business modifying them. The only items it writes
-        # are USER#<sub> / RATE#analyse and PLAYER#... / ANALYSE#claim.
+        # are USER#<sub> / RATE#analyse, PLAYER#... / ANALYSE#claim and
+        # GLOBAL#analyse / DAY#<date>, the daily cap.
         #
         # DeleteItem is only ever used to release a claim whose run never
         # started, because the request was rate-limited after claiming.
@@ -665,6 +678,7 @@ resource "aws_lambda_function" "analyse" {
       ANALYSE_RATE_BURST          = tostring(var.analyse_rate_burst)
       ANALYSE_RATE_REFILL_SECONDS = tostring(var.analyse_rate_refill_seconds)
       ANALYSE_CLAIM_SECONDS       = tostring(var.analyse_claim_seconds)
+      ANALYSE_DAILY_GAME_CAP      = tostring(var.analyse_daily_game_cap)
     }
   }
 
