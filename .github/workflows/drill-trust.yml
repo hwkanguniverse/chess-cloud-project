@@ -41,7 +41,7 @@ jobs:
             out=$(aws sts assume-role-with-web-identity --region ap-southeast-1 \
               --role-arn "arn:aws:iam::961868442307:role/chess-cloud-ci-$role" \
               --role-session-name drill-trust --web-identity-token "$token" \
-              --query 'AssumedRoleUser.Arn' --output text 2>&1)
+              --query 'AssumedRoleUser.Arn' --output text 2>&1) || true  # a refusal is the expected result, not a failure
             case "$out" in
               arn:aws:sts::*) got=allowed ;;
               *AccessDenied*) got=denied ;;
