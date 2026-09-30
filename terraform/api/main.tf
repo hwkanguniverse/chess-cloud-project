@@ -534,20 +534,13 @@ resource "aws_iam_role_policy" "players" {
     Statement = [
       {
         Effect = "Allow"
-        # Scan, and the only route in the project that gets it. "List all
-        # players" has no partition key, so the primary key cannot answer it -
-        # this reads the whole table and discards most of what it reads.
-        #
-        # Granted knowingly and temporarily. The cost of a Scan grows with
-        # total items rather than with the number of players, so one busy
-        # account adds ~200 archive items that this route must read on every
-        # call. The fix is a GSI keyed for listing, at which point this becomes
-        # Query and the permission goes back to matching every other read role.
-        Action = ["dynamodb:Scan"]
-        # The directory index, granted a PR ahead of the code that reads it -
-        # Phase 4's outage came from a grant and its first use going out in
-        # one apply. The table grant goes when the route has moved over.
-        Resource = [local.table_arn, "${local.table_arn}/index/directory"]
+        # Scan, and the only route in the project that gets it: "list all
+        # players" has no key to query by. Scoped to the directory index, which
+        # holds month items only, so it can no longer read the whole table.
+        # Until 30 Sep it Scanned the table itself; that grant was removed a PR
+        # after the index one was added, per the Phase 4 rule.
+        Action   = ["dynamodb:Scan"]
+        Resource = "${local.table_arn}/index/directory"
       },
       {
         Effect   = "Allow"
