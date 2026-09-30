@@ -111,8 +111,8 @@ Same standard as every prior phase: watched live, not asserted.
 
 ## Cost controls
 
-- [ ] **Actions minutes.** A private repo has 2,000/month free; eight roots of `init` + `plan` is a few minutes per run. Know the per-run figure after the first real run.
-- [ ] **ECR storage**, if images are tagged per commit: each is ~hundreds of MB. A lifecycle policy keeping the last few is the obvious bound.
+- [x] **Actions minutes.** A private repo has 2,000/month free; eight roots of `init` + `plan` is a few minutes per run. Know the per-run figure after the first real run. *Measured 30 Sep, the heaviest day this phase will have: 29 runs, **102 billed minutes** (each job rounded up to the minute). A plan is ~4 min, an apply ~5 — so an ordinary change (PR plan + merge apply) is ~9 min, ~220 changes a month inside the free 2,000. Not a constraint.*
+- [x] **ECR storage**, if images are tagged per commit: each is ~hundreds of MB. A lifecycle policy keeping the last few is the obvious bound. *Measured 30 Sep: ~131 MB per image, 7 in the repo (5 older + 2 SHA-tagged); the existing keep-last-5 lifecycle policy bounds it at ~0.65 GB, ~$0.07/month at $0.10/GB. Lifecycle expiry is asynchronous, which is why 7 are briefly present. Safe with SHA tags because the deployed image is always the newest push.*
 - [ ] **Re-run `scripts/check-drift.sh` after each apply.**
 - [ ] **Workers back to zero after every drill.**
 
