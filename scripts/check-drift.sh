@@ -97,11 +97,14 @@ fi
 # it silently. This is the one check here that guards a security property
 # rather than a cost.
 echo "Task security group (no inbound - what makes public subnets safe):"
-SG=$(aws ec2 describe-security-groups --region "$REGION"   --filters Name=group-name,Values=chess-cloud-tasks   --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
+SG=$(aws ec2 describe-security-groups --region "$REGION" \
+  --filters Name=group-name,Values=chess-cloud-tasks \
+  --query 'SecurityGroups[0].GroupId' --output text 2>/dev/null)
 if [ -z "$SG" ] || [ "$SG" = "None" ]; then
   flag "chess-cloud-tasks security group is missing"
 else
-  INGRESS=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$SG"     --query 'length(SecurityGroups[0].IpPermissions)' --output text 2>/dev/null)
+  INGRESS=$(aws ec2 describe-security-groups --region "$REGION" --group-ids "$SG" \
+    --query 'length(SecurityGroups[0].IpPermissions)' --output text 2>/dev/null)
   if [ "$INGRESS" = "0" ]; then
     ok "no inbound rules"
   else
@@ -114,13 +117,19 @@ fi
 # working perfectly, since that is where it ran until Phase 6 - so nothing
 # would surface it except this check.
 echo "Fargate tasks in the purpose-built VPC (not the default):"
-VPC=$(aws ec2 describe-vpcs --region "$REGION"   --filters Name=tag:Name,Values=chess-cloud   --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
+VPC=$(aws ec2 describe-vpcs --region "$REGION" \
+  --filters Name=tag:Name,Values=chess-cloud \
+  --query 'Vpcs[0].VpcId' --output text 2>/dev/null)
 if [ -z "$VPC" ] || [ "$VPC" = "None" ]; then
   flag "the chess-cloud VPC is missing"
 else
-  WANT=$(aws ec2 describe-subnets --region "$REGION"     --filters Name=vpc-id,Values="$VPC"     --query 'sort_by(Subnets,&SubnetId)[].SubnetId' --output text 2>/dev/null)
+  WANT=$(aws ec2 describe-subnets --region "$REGION" \
+    --filters Name=vpc-id,Values="$VPC" \
+    --query 'sort_by(Subnets,&SubnetId)[].SubnetId' --output text 2>/dev/null)
   for S in worker evaluator; do
-    GOT=$(aws ecs describe-services --cluster chess-cloud --services "$S" --region "$REGION"       --query 'sort_by(services[0].networkConfiguration.awsvpcConfiguration.subnets,&@)'       --output text 2>/dev/null)
+    GOT=$(aws ecs describe-services --cluster chess-cloud --services "$S" --region "$REGION" \
+      --query 'sort_by(services[0].networkConfiguration.awsvpcConfiguration.subnets,&@)' \
+      --output text 2>/dev/null)
     if [ -z "$GOT" ] || [ "$GOT" = "None" ]; then
       ok "$S not deployed yet"
     elif [ "$GOT" = "$WANT" ]; then
@@ -139,7 +148,9 @@ fi
 echo "Gateway endpoints (free, and S3 is on the ECR image-pull path):"
 if [ -n "$VPC" ] && [ "$VPC" != "None" ]; then
   for SVC in dynamodb s3; do
-    N=$(aws ec2 describe-vpc-endpoints --region "$REGION"       --filters Name=vpc-id,Values="$VPC" Name=service-name,Values="com.amazonaws.$REGION.$SVC"       --query 'length(VpcEndpoints[?State==`available`])' --output text 2>/dev/null)
+    N=$(aws ec2 describe-vpc-endpoints --region "$REGION" \
+      --filters Name=vpc-id,Values="$VPC" Name=service-name,Values="com.amazonaws.$REGION.$SVC" \
+      --query 'length(VpcEndpoints[?State==`available`])' --output text 2>/dev/null)
     if [ "$N" = "1" ]; then
       ok "$SVC endpoint present"
     else
