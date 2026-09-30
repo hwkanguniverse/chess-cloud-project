@@ -1,0 +1,13 @@
+# Every package in the image, exact, installed with --no-deps so nothing can
+# float. Pinning boto3 alone was not enough: it accepts a range of botocore,
+# and the first CI build pulled botocore 1.43.105 and urllib3 2.8.0 where the
+# image it replaced had 1.43.80 and 2.7.0. These are that image's versions,
+# read from its layers. `pip check` in the build proves the set is complete.
+boto3==1.43.80
+botocore==1.43.80
+chess==1.11.2
+jmespath==1.1.0
+python-dateutil==2.9.0.post0
+s3transfer==0.19.2
+six==1.17.0
+urllib3==2.7.0

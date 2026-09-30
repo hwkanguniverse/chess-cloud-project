@@ -27,8 +27,9 @@ RUN apt-get update -qq \
 
 # python-chess parses PGNs and speaks UCI to the engine. Both are real work
 # with real edge cases (annotations, variations, mate scores) and neither is
-# worth hand-rolling.
-RUN pip install --no-cache-dir boto3==1.43.80 chess==1.11.2
+# worth hand-rolling. Versions, transitive ones included, in requirements.txt.
+COPY requirements.txt ./
+RUN pip install --no-cache-dir --no-deps -r requirements.txt && pip check
 
 WORKDIR /app
 COPY worker.py evaluator.py jsonlog.py ./
