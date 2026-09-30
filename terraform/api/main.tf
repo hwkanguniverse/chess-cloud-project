@@ -264,6 +264,12 @@ locals {
 # --- Packaging -------------------------------------------------------------
 # Each handler is a single stdlib+boto3 file, so packaging is just zipping it.
 # boto3 ships in the Lambda runtime; no dependency layer needed.
+#
+# output_file_mode is fixed because the zip records each file's mode, and the
+# mode depends on the machine: Windows reports 0666, a Linux checkout 0644.
+# Unpinned, the same commit hashed differently on the laptop and in CI, so
+# each would redeploy all six functions over a permission bit. Line endings
+# are the other half of this, pinned in .gitattributes.
 
 data "archive_file" "submit" {
   type             = "zip"
