@@ -260,17 +260,3 @@ output "dlq_url" {
 output "dlq_arn" {
   value = aws_sqs_queue.analysis_dlq.arn
 }
-
-# --- DRILL: a partial apply (reverted) --------------------------------------
-# Two log groups, applied in parallel. The first is valid. The second reuses a
-# name the worker root already owns, so the plan passes and AWS rejects it at
-# apply time - leaving this root half-applied and the roots after it untouched.
-resource "aws_cloudwatch_log_group" "drill_ok" {
-  name              = "/drill/partial-apply"
-  retention_in_days = 1
-}
-
-resource "aws_cloudwatch_log_group" "drill_conflict" {
-  name              = "/ecs/chess-cloud-worker"
-  retention_in_days = 1
-}
