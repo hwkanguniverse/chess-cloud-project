@@ -10,6 +10,7 @@ Previous phases: [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PHASE-3.md
 
 **Owed from earlier phases and not this phase's work:**
 - **Phase F's hosting is still blocked on choosing a domain** — CORS, the browser drills and the public launch all wait behind it. The frontend is therefore out of this pipeline's scope until it has somewhere to deploy to.
+- **Going public — the site *or* the repo — first needs Phase E's global daily ceiling.** Self sign-up is on, accounts are free, and each can spend ~$2.40/day under the per-account bucket. The repo holds the live API URL and Cognito IDs, so making it public is the same launch.
 
 Account: `961868442307` · Region: `ap-southeast-1` · IAM user: `terraform-admin` (MFA enabled)
 
@@ -64,7 +65,7 @@ Stated first, because the gaps are specific.
 
 Each has a real trade-off.
 
-- [ ] **Repo visibility — and therefore what GitHub will actually enforce.** On the Free plan, *private* repos get no branch protection and no deployment environments, so "apply on merge" is a habit rather than a control; they also get 2,000 Actions minutes/month. *Public* repos get both protections and unlimited minutes, but publish the code, the account ID and the alert email (none secret; the account ID is mildly sensitive). GitHub Pro is ~$4/month — twice this project's budget. **Options: public; private and accept convention; Pro.** *(Plan details to be checked against GitHub's current docs before deciding.)*
+- [x] **Repo visibility — and therefore what GitHub will actually enforce.** *Decided: private for now — see the decision log.* On the Free plan, *private* repos get no branch protection and no deployment environments, so "apply on merge" is a habit rather than a control; they also get 2,000 Actions minutes/month. *Public* repos get both protections and unlimited minutes, but publish the code, the account ID and the alert email (none secret; the account ID is mildly sensitive). GitHub Pro is ~$4/month — twice this project's budget. **Options: public; private and accept convention; Pro.** *(Plan details to be checked against GitHub's current docs before deciding.)*
 - [ ] **Flow: plan on PR, apply on merge — or not?** The skill says PRs. This is a one-person repo that has committed straight to `main` for seven phases. A PR flow is the thing interviewers recognise and makes a plan reviewable before it applies; direct pushes are honest about how the work is done. **Options: PRs for everything; PRs for `terraform/` only; push to `main` and plan-then-apply in one run.**
 - [ ] **How much power the apply role gets.** Because Terraform here writes IAM, the apply role can escalate to admin whatever its policy says. **Options: `AdministratorAccess`, controlled entirely by who can assume it (the OIDC trust conditions); a hand-scoped policy (long, and breaks every phase that adds a service); a permissions boundary that every role Terraform creates must carry (real containment, more Terraform).** The plan role is separate and read-only either way.
 - [ ] **Does the laptop keep applying?** Two sources of applies means the CRLF churn above, and two actors racing one state lock. **Options: CI only, with `terraform-admin` kept as break-glass; both, with line endings pinned so the zips match.**
@@ -127,7 +128,7 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
-| *(none yet)* | | | |
+| Repo visibility | **Private for this phase; public deferred to the launch** | Public now; public after building a global daily cap; GitHub Pro | Nothing in Phase 5 needs public. The control over who can deploy is the OIDC trust policy, which works identically on a private repo; branch protection would only guard a one-person repo from its owner; 2,000 minutes/month is hundreds of runs. **A history scan (30 Sep, all 86 commits) found no credentials** — no keys, tokens, state, plans or tfvars — but did find the live API URL, Cognito pool and client IDs in `web/.env.example`. With self sign-up on and accounts free, **publishing the repo is going public**: each account can spend ~$2.40/day, and the global daily ceiling Phase E named for that is not built. So visibility is decided together with that ceiling and Phase F's launch — a portfolio decision, not a CI one |
 
 ---
 
