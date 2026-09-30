@@ -189,6 +189,8 @@ Three things bound it together:
 - [x] **Task sizing.** Ingestion stays 0.25 vCPU / 0.5 GB; the evaluator runs **1 vCPU / 2 GB** with `Threads: 1` and a 128 MB hash. One thread per task rather than four per task, because SQS already parallelises across tasks and Stockfish scales better across processes than threads at fixed depth.
 - [x] **Re-measure the per-month cost** with the engine in the loop. Phase 3's $0.000186/month and $0.028/player were ingestion-only and did not survive — but **evaluation came in cheaper than planned, not dearer**, because games take 31.4 s rather than the assumed 55.6 s. At Spot rates for 1 vCPU / 2 GB that is **$0.000143/game**, 62% of the $0.00023 this file budgeted:
 
+  ***Superseded 30 Sep (Phase 4): ~2× too low.** Re-measured from whole-task lifetimes, which match the billed Spot vCPU-hours within 1–2%: **$0.00027–0.00032/game, ~$0.10 per 300-game player.** The figures below priced median engine time only. A bill pays for the mean (41–53 s, player-dependent), plus 14–22% of idle waiting for scale-in, at a Spot rate ~15% higher than assumed. See the cost model in the `aws-cert-plan` skill.*
+
 | | Games | Cost | 1 task | 8 tasks |
 |---|---|---|---|---|
 | **theohwk** *(measured 31 Aug)* | **201** | **$0.029** | 1.8 hr | **13.9 min** |
