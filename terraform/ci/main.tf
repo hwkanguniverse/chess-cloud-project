@@ -44,10 +44,17 @@ variable "region" {
   default     = "ap-southeast-1"
 }
 
-variable "github_repo" {
-  description = "owner/name of the only repository allowed to assume these roles."
+# The repository as GitHub names it in the token's subject. This repo uses
+# GitHub's immutable subject format: owner and repo each carry their numeric
+# ID (owner@id/repo@id). Found by the first run being refused - CloudTrail
+# showed the subject GitHub actually sent. It is the stronger form: a name can
+# be renamed away and re-registered by someone else, an ID cannot, so a trust
+# policy on IDs cannot be inherited by a lookalike repo. Read the current
+# value from GET /repos/{owner}/{repo}/actions/oidc/customization/sub.
+variable "github_subject_repo" {
+  description = "Subject prefix of the only repository allowed to assume these roles."
   type        = string
-  default     = "hwkanguniverse/chess-cloud-project"
+  default     = "hwkanguniverse@8513534/chess-cloud-project@1332943637"
 }
 
 locals {
@@ -71,10 +78,10 @@ data "aws_iam_policy_document" "trust" {
   for_each = {
     # Pull requests plan. GitHub's subject for a pull_request event carries no
     # branch - every PR in this repo gets the same one.
-    plan = "repo:${var.github_repo}:pull_request"
+    plan = "repo:${var.github_subject_repo}:pull_request"
     # Only main applies. A push to any other branch has a different subject,
     # so a workflow committed to a branch cannot reach this role.
-    apply = "repo:${var.github_repo}:ref:refs/heads/main"
+    apply = "repo:${var.github_subject_repo}:ref:refs/heads/main"
   }
 
   statement {

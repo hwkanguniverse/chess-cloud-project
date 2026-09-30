@@ -264,41 +264,53 @@ locals {
 # --- Packaging -------------------------------------------------------------
 # Each handler is a single stdlib+boto3 file, so packaging is just zipping it.
 # boto3 ships in the Lambda runtime; no dependency layer needed.
+#
+# output_file_mode is fixed because the zip records each file's mode, and the
+# mode depends on the machine: Windows reports 0666, a Linux checkout 0644.
+# Unpinned, the same commit hashed differently on the laptop and in CI, so
+# each would redeploy all six functions over a permission bit. Line endings
+# are the other half of this, pinned in .gitattributes.
 
 data "archive_file" "submit" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/submit.py"
-  output_path = "${path.module}/build/submit.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/submit.py"
+  output_path      = "${path.module}/build/submit.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "analyse" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/analyse.py"
-  output_path = "${path.module}/build/analyse.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/analyse.py"
+  output_path      = "${path.module}/build/analyse.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "status" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/status.py"
-  output_path = "${path.module}/build/status.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/status.py"
+  output_path      = "${path.module}/build/status.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "link" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/link.py"
-  output_path = "${path.module}/build/link.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/link.py"
+  output_path      = "${path.module}/build/link.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "player" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/player.py"
-  output_path = "${path.module}/build/player.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/player.py"
+  output_path      = "${path.module}/build/player.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "players" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/players.py"
-  output_path = "${path.module}/build/players.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/players.py"
+  output_path      = "${path.module}/build/players.zip"
+  output_file_mode = "0644"
 }
 
 # --- Logs ------------------------------------------------------------------
