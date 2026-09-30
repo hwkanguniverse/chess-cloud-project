@@ -1,0 +1,82 @@
+# Apply every root when main changes, then prove the API still answers.
+#
+# main only moves by a merged PR whose plan was read, so this applies what was
+# reviewed - re-planned at apply time rather than from the reviewed plan file,
+# accepted with one author (see the decision log). The role it assumes is
+# admin; the trust policy in terraform/ci is what limits who can reach it.
+
+name: apply
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "terraform/**"
+      - "app/**"
+      - "tests/**"
+      - ".github/workflows/**"
+  workflow_dispatch: # re-run by hand, e.g. after a failed apply
+
+permissions:
+  id-token: write
+  contents: read
+
+# Never two applies at once, and never cancel one mid-flight: a cancelled
+# apply can leave a root half-changed. A second push waits its turn.
+concurrency:
+  group: apply
+  cancel-in-progress: false
+
+env:
+  # Dependency order - each reads the ones before it through remote state.
+  # bootstrap and ci are applied by hand, never here.
+  ROOTS: guardrails network data queue auth worker api
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+
+  apply:
+    needs: checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::961868442307:role/chess-cloud-ci-apply
+          aws-region: ap-southeast-1
+
+      - uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.15.8
+          terraform_wrapper: false
+
+      # Stops at the first root that fails: later roots read its outputs, and
+      # applying them against a half-applied dependency is how a partial
+      # failure becomes a confusing one. Re-running converges.
+      - name: Apply each root
+        run: |
+          for root in $ROOTS; do
+            echo "::group::$root"
+            terraform -chdir="terraform/$root" init -input=false -no-color
+            terraform -chdir="terraform/$root" apply -auto-approve -input=false -no-color
+            echo "::endgroup::"
+          done
+
+      # A green apply is not a working app. Phase 4's outage was exactly this:
+      # the apply succeeded and every /player returned 500 for five minutes
+      # while an IAM grant propagated. Retries cover normal propagation; an
+      # outage longer than that turns the run red, which is the point.
+      - name: Smoke test the API
+        run: |
+          api=$(terraform -chdir=terraform/api output -raw api_endpoint)
+          for attempt in $(seq 1 12); do
+            players=$(curl -s -o /dev/null -w '%{http_code}' "$api/players")
+            player=$(curl -s -o /dev/null -w '%{http_code}' "$api/player/chesscom/hikaru")
+            echo "attempt $attempt: /players $players, /player/chesscom/hikaru $player"
+            if [ "$players" = 200 ] && [ "$player" = 200 ]; then exit 0; fi
+            sleep 10
+          done
+          echo "::error::API not healthy two minutes after apply"
+          exit 1

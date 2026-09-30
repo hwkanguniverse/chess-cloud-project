@@ -1,0 +1,36 @@
+# Checks that run before anything is applied. Called by plan (on PRs) and by
+# apply (on main), so both gate on one definition.
+#
+# Each names the failure it catches - there is no coverage suite by decision:
+#   compile   a syntax error that would deploy a Lambda crashing on every
+#             request. Terraform zips whatever it is given; the plan looks fine.
+#   unittest  player.py and analyse.py selecting different games - see
+#             tests/test_selection.py.
+
+name: checks
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The Lambdas' runtime, so the compile check means what it says.
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Compile every Python file
+        run: python -m compileall -q app scripts tests
+
+      # boto3 only so the handlers import; nothing here calls AWS.
+      - name: Selection agrees between player and analyse
+        run: |
+          pip install --quiet boto3==1.43.72
+          python -m unittest discover -s tests -v
