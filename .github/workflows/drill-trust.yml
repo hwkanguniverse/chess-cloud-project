@@ -1,0 +1,54 @@
+# DRILL - never merged. Proves the deploy roles' trust policies refuse what
+# they should, by asking AWS directly with this run's own OIDC token: one
+# attempt per role, no retries, so the answer is unambiguous.
+#
+#   push to drill/trust   sub = ...:ref:refs/heads/drill/trust
+#                         plan  -> denied (not a pull_request)
+#                         apply -> denied (not main)
+#   pull_request          sub = ...:pull_request
+#                         plan  -> allowed
+#                         apply -> denied (not main)
+
+name: drill-trust
+
+on:
+  push:
+    branches: [drill/trust]
+  pull_request:
+    branches: [main]
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  assume:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Try each role once
+        run: |
+          token=$(curl -sS -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=sts.amazonaws.com" | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])')
+          sub=$(python3 -c 'import base64,json,sys; p=sys.argv[1].split(".")[1]; print(json.loads(base64.urlsafe_b64decode(p+"="*(-len(p)%4)))["sub"])' "$token")
+          echo "event: $GITHUB_EVENT_NAME"
+          echo "token sub: $sub"
+
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then want_plan=allowed; else want_plan=denied; fi
+          want_apply=denied
+
+          bad=0
+          for role in plan apply; do
+            out=$(aws sts assume-role-with-web-identity --region ap-southeast-1 \
+              --role-arn "arn:aws:iam::961868442307:role/chess-cloud-ci-$role" \
+              --role-session-name drill-trust --web-identity-token "$token" \
+              --query 'AssumedRoleUser.Arn' --output text 2>&1)
+            case "$out" in
+              arn:aws:sts::*) got=allowed ;;
+              *AccessDenied*) got=denied ;;
+              *) got="error: $out" ;;
+            esac
+            [ "$role" = plan ] && want=$want_plan || want=$want_apply
+            echo "$role: $got (expected $want)"
+            [ "$got" = "$want" ] || bad=1
+          done
+          exit $bad
