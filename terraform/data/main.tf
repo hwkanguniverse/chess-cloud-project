@@ -89,6 +89,11 @@ resource "aws_dynamodb_table" "games" {
     type = "S"
   }
 
+  attribute {
+    name = "archive"
+    type = "S"
+  }
+
   # No GSI on gameId, deliberately. Both lookup patterns are served by the
   # primary key alone; a GSI would be eventually consistent, so a status poll
   # immediately after submit could 404 on a game that exists.
@@ -121,6 +126,37 @@ resource "aws_dynamodb_table" "games" {
     }
     projection_type    = "INCLUDE"
     non_key_attributes = ["evalDepth"]
+  }
+
+  # directory: every player-month, and nothing else - what GET /players lists.
+  # Until this existed that route Scanned the whole table for the month items
+  # scattered among the games: 203 months among 83,427 items on 30 Sep, so its
+  # 20-page safety limit stopped after two of six players and the page said
+  # the list was incomplete. PHASE-3 planned this index and deferred it until
+  # the Scan could be watched failing; it has been.
+  #
+  # Keyed on `archive` ("2026-09") because every month item already carries it
+  # as a string and no other item does - checked across the whole table - so
+  # the index is sparse by construction and DynamoDB fills it from the
+  # existing months itself: no new attribute, no backfill. Months spread
+  # across ~200 archive values, so no hot key either. PK as the sort key keeps
+  # each entry unique. The route Scans the index - listing everything has no
+  # key to query by - but that now reads ~200 small entries, not the table.
+  #
+  # Eventually consistent is fine: a month finished a second ago may list as
+  # pending for a second.
+  global_secondary_index {
+    name = "directory"
+    key_schema {
+      attribute_name = "archive"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "PK"
+      key_type       = "RANGE"
+    }
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["status", "summary", "analysedAt"]
   }
 
   # Short-lived control items carry an expiresAt and are swept by DynamoDB:
