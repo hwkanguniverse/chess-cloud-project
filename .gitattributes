@@ -1,0 +1,12 @@
+# LF everywhere, on every machine, whatever core.autocrlf says.
+#
+# Terraform zips the Lambda handlers straight from the working copy, so line
+# endings are part of each function's code hash. With autocrlf on Windows the
+# handlers had CRLF; a Linux CI runner checks out LF. The same commit then
+# built different zips in the two places, and each apply would redeploy all
+# six Lambdas over bytes nobody can see.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
