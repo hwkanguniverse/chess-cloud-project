@@ -80,8 +80,9 @@ Ordered so each piece is verifiable before the next depends on it.
 - [ ] **A `ci` root, applied by hand:** the GitHub OIDC provider and the plan and apply roles. The one unavoidable chicken-and-egg — CI cannot create the role it assumes — so, like `bootstrap`, it stays a manual apply.
 - [ ] **Pin line endings** with `.gitattributes`, so a Lambda zip is byte-identical whether built on Windows or Linux — then a break-glass laptop apply does not redeploy every function.
 - [ ] **Push the repo**, and a first workflow that only *plans*, with the read-only role. Seen producing the expected result: no changes, or exactly the CRLF Lambda diff and nothing else.
-- [ ] **The apply workflow**, running the roots in dependency order.
-- [ ] **The worker image**: built, pushed and deployed by the pipeline, in whatever form is decided above.
+- [ ] **Pre-apply checks** on every PR: the Python compile check, and the unit test that player's and analyse's selection agree — seen failing on a deliberate break before trusted.
+- [ ] **The apply workflow**, running the roots in dependency order, ending in the **post-deploy smoke test**.
+- [ ] **The worker image**: pinned (base image and packages), tagged with the git SHA, pushed, and deployed through `image_tag`; an ECR lifecycle policy keeps the last few. Verified by the running task naming the SHA.
 - [ ] **`check-drift.sh` in the pipeline**, and **extended to assert the OIDC trust conditions** — a trust policy loosened to `repo:*` would keep every workflow working perfectly, the failure that looks like success.
 
 ## What must not change
