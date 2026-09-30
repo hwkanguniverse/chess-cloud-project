@@ -102,7 +102,7 @@ Carried forward because the temptation to revisit them does not go away.
 
 Same standard as every prior phase: watched live, not asserted.
 
-- [ ] **The trust policy refuses what it should** → a workflow on a non-`main` ref (or a PR, for the apply role) tries to assume the apply role and is denied. A trust policy only ever seen accepting is untested.
+- [x] **The trust policy refuses what it should** → a workflow on a non-`main` ref (or a PR, for the apply role) tries to assume the apply role and is denied. A trust policy only ever seen accepting is untested. *Drilled 30 Sep on a throwaway branch (draft PR #5, closed, never merged): a workflow took its own OIDC token and tried each role once with the plain CLI. **Branch push** (`ref:refs/heads/drill/trust`): plan denied, apply denied. **Pull request**: plan allowed, apply denied. All four as expected. The first attempt proved nothing — `bash -e` aborted the script at the first refusal before it printed a result, so a denial looked like a script failure; a check that cannot report its expected outcome is not a check. Also: CloudTrail records a failed `AssumeRoleWithWebIdentity` without the role ARN, so the workflow's own output is the evidence of which role refused.*
 - [ ] **A broken change stops before it applies** → a deliberate `terraform validate` or plan failure, and nothing reaches AWS.
 - [ ] **An apply fails partway through the roots** → what state is each root left in, and does re-running converge?
 - [ ] **Two pushes close together** → two runs against one state. Does the concurrency setting or the S3 lock stop them, and which one wins?
