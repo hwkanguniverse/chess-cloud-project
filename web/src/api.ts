@@ -132,6 +132,12 @@ export interface EvaluationState {
    * player's whole history. Kept optional so an older API still type-checks.
    */
   excludedPartial?: boolean;
+  /**
+   * A run is in flight for this player, by anyone - read from the server's
+   * per-player claim, so it survives a refresh and shows in a second tab.
+   * Optional so an older API still type-checks.
+   */
+  running?: boolean;
   depth: number;
 }
 

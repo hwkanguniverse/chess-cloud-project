@@ -487,7 +487,11 @@ function Evaluation({
   // is *in flight*, and conflating the two disabled the button exactly when
   // there was work to do. Only a request this page made (or one the API told
   // us about via alreadyQueued) means the engine is actually working.
-  const running = queued && outstanding > 0;
+  //
+  // `state.running` is that same fact from the server - the per-player claim -
+  // so a refresh, a second tab or another device sees the run too. Without
+  // it, a refresh mid-run offered the button again and hid the progress.
+  const running = (queued || state.running === true) && outstanding > 0;
   const done = inScope > 0 && outstanding === 0;
   const percent = inScope > 0 ? Math.round((evaluated / inScope) * 100) : 0;
 

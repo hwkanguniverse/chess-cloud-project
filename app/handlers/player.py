@@ -19,14 +19,19 @@ per-month route is - see status.py and the decision log in PHASE-3.md.
 import json
 import os
 import re
+import time
 from decimal import Decimal
+
+import logging
 
 import boto3
 from boto3.dynamodb.conditions import Key
+from botocore.exceptions import ClientError
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
+log = logging.getLogger()
 
 PLATFORM_RE = re.compile(r"^(chesscom|lichess)$")
 USERNAME_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
@@ -150,6 +155,40 @@ def evaluation_state(pk, months):
     }
 
 
+def run_in_flight(pk):
+    """Whether analyse.py's per-player claim is live - i.e. a run is going.
+
+    The page used to know only about runs *it* started, held in component
+    state, so a refresh during a run showed the Analyse button again and hid
+    the progress panel. `outstanding > 0` cannot stand in for this: it is
+    also true of a player nobody has analysed, which is the bug that made the
+    page track runs itself in the first place.
+
+    Mirrors the claim exactly, expiry included, so the button reappears only
+    when a click would be accepted rather than answered with alreadyQueued.
+    The claim is a fixed window (ANALYSE_CLAIM_SECONDS), so a run that
+    outlasts it reads as not running for its tail - which is also exactly
+    when analyse.py would accept a second request.
+    """
+    #
+    # Fails open. This only decides how the button looks, and it once took the
+    # whole route down: deployed with its IAM grant in the same apply, every
+    # /player returned 500 on AccessDenied for minutes while the grant
+    # propagated. An advisory read must not be able to fail the page.
+    try:
+        claim = table.get_item(
+            Key={"PK": pk, "SK": "ANALYSE#claim"},
+            ProjectionExpression="expiresAt",
+        ).get("Item")
+    except ClientError as exc:
+        log.warning(
+            f"claim read failed, reporting not running: {exc}",
+            extra={"event": "claim_read_failed", "pk": pk},
+        )
+        return False
+    return bool(claim) and int(claim.get("expiresAt", 0)) > int(time.time())
+
+
 def cumulative(months):
     """Totals across every COMPLETE month, from the per-month aggregates.
 
@@ -263,7 +302,10 @@ def handler(event, context):
             # only been ingested reports a truthful zero rather than the
             # client having to infer absence - which is the ambiguity this
             # whole thing exists to remove.
-            "evaluation": evaluation_state(f"PLAYER#{platform}#{username}", months),
+            "evaluation": {
+                **evaluation_state(f"PLAYER#{platform}#{username}", months),
+                "running": run_in_flight(f"PLAYER#{platform}#{username}"),
+            },
             "months": months,
         },
     )

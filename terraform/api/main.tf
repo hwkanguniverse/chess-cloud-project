@@ -525,10 +525,11 @@ resource "aws_iam_role_policy" "player" {
     Statement = [
       {
         Effect = "Allow"
-        # Query, not GetItem: every month for a player shares one partition
-        # key, so the whole history is a single Query against the primary key.
-        # No Scan, and no index - the read this layout was chosen for.
-        Action = ["dynamodb:Query"]
+        # Query for the months and the by-class index: every month for a
+        # player shares one partition key, so the whole history is a single
+        # Query. GetItem only for analyse's per-player claim, so the page can
+        # tell a run in flight from games nobody has queued. No Scan.
+        Action = ["dynamodb:Query", "dynamodb:GetItem"]
         # The index ARN is separate from the table's: a Query with IndexName
         # against a policy naming only the table is denied.
         Resource = [local.table_arn, "${local.table_arn}/index/by-class"]
