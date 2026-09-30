@@ -62,10 +62,10 @@ _verified_subs = set()
 # path; anything outside this set would corrupt one or the other.
 USERNAME_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 
-# Chess.com is the only ingestion source. Lichess exists in this app for
-# account linking (Phase 2) and has no equivalent archive-list endpoint, so
-# accepting it here would produce a confusing upstream 404 rather than an
-# answer. Rejected explicitly until Lichess ingestion is actually built.
+# Chess.com is the only ingestion source. Lichess has no equivalent
+# archive-list endpoint, so accepting it here would produce a confusing
+# upstream 404 rather than an answer. Rejected explicitly until Lichess
+# ingestion is actually built.
 INGESTABLE_PLATFORMS = ("chesscom",)
 
 # The archive list returns full URLs ending in /yyyy/mm.

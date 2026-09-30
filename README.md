@@ -19,7 +19,7 @@ flowchart LR
     U[Browser<br/>React + Cognito] -->|JWT| GW[API Gateway<br/>HTTP API]
     GW --> S[submit λ]
     GW --> A[analyse λ]
-    GW --> R[player / players /<br/>status / link λ]
+    GW --> R[player / players /<br/>status λ]
 
     S -->|archive list| CC[(Chess.com<br/>Published Data API)]
     S -->|1 msg per month| Q1[[SQS ingestion]]
@@ -40,7 +40,7 @@ flowchart LR
 
 | Layer | What's used | Why this and not the obvious alternative |
 |---|---|---|
-| API | API Gateway HTTP API, 6 Python Lambdas, Cognito JWT authorizer | Reads are public; only the routes that spend money need a token |
+| API | API Gateway HTTP API, 5 Python Lambdas, Cognito JWT authorizer | Reads are public; only the routes that spend money need a token |
 | Work | SQS + ECS Fargate Spot, two services | Stockfish is CPU-bound and wants a warm engine process — the rare case where "why not Lambda" has a real answer. Spot is ~70% off, and the queue makes an interruption free |
 | Data | DynamoDB, single table, one sparse GSI | Fixed access patterns make DynamoDB the *better* answer, not just the cheaper one — no joins, no ad-hoc queries |
 | Network | Custom VPC, public subnets, no-ingress security group, free gateway endpoints | Private subnets would cost a ~$32/month NAT (16× the budget) to protect tasks nothing can already reach |
@@ -71,7 +71,7 @@ Each of these has a longer write-up, with the alternative that was rejected, in 
 - **Bound the games, not the depth.** Shallow Stockfish looked like the obvious cost lever. Benchmarked over 1,047 real positions, depth 8 finds only 53% of blunders and halves the headline accuracy figure. So the depth stays at 18 and the *game count* is bounded instead — which also makes a 70,000-game player cost the same as anyone else.
 - **One queue message per game, one message per receive.** Batching ten slow games overran the visibility timeout, and the tail was evaluated twice (236 evaluations for 200 games). Request IDs threaded through the queue are what made that countable.
 - **Derive on read; store only what one writer owns.** Progress counters would be incremented by up to eight evaluators at once. Instead, progress is computed from the game items on read — so it cannot drift.
-- **Cut what has no failure mode here.** S3 uploads, account verification, private subnets, a dashboard and a spending stop were all planned and all cut, each with a written reason. (The spending stop came back later as a daily cap, once evaluation made it necessary.)
+- **Cut what has no failure mode here.** S3 uploads, account verification, private subnets, a dashboard and a spending stop were all planned and all cut, each with a written reason. (The spending stop came back later as a daily cap, once evaluation made it necessary.) Account linking — Lichess OAuth with PKCE — was *built*, then removed once verification was cut and nothing depended on it.
 
 ## Operations
 
@@ -120,6 +120,6 @@ In phases, each with its decisions, rejected alternatives, and failure drills wr
 
 ## Limits, stated
 
-- **Chess.com only.** Lichess is used for account linking, not ingestion.
+- **Chess.com only.** Lichess has no archive-list endpoint to walk, so ingesting it would be a different design.
 - **Horizontal ingestion scaling is unresolved, not unbuilt.** It waits on confirming Chess.com's real limit, not on a mechanism.
 - **Scale-to-zero costs latency.** SQS metrics lag ~5 minutes, so the first task can take 1–5 minutes to start. That is the accepted price of a near-zero bill.

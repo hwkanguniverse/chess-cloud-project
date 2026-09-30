@@ -97,8 +97,7 @@ function SubmitForm() {
       )}
 
       <p className="muted small" style={{ marginBottom: 0 }}>
-        Chess.com only. Lichess is linkable as an account but has no archive
-        list to walk, so it cannot be ingested this way.
+        Chess.com only, for now.
       </p>
     </Card>
   );

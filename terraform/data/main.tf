@@ -123,13 +123,12 @@ resource "aws_dynamodb_table" "games" {
     non_key_attributes = ["evalDepth"]
   }
 
-  # In-flight OAuth link attempts (SK = OAUTH#<state>) carry an expiresAt and
-  # are swept by DynamoDB. This is what makes an abandoned link flow leave
-  # nothing behind: the user who starts a Lichess link and never returns has
-  # their pending state deleted rather than lingering as a half-written link.
-  # Deletion is free and asynchronous - within ~48h of expiry, not instantly -
-  # so the handlers must still treat an expired item as absent rather than
-  # trusting the sweep to have run.
+  # Short-lived control items carry an expiresAt and are swept by DynamoDB:
+  # rate-limit buckets, per-player analyse claims and the daily game cap. It
+  # was added for in-flight OAuth link attempts, removed with account linking
+  # on 30 Sep 2026. Deletion is free and asynchronous - within ~48h of expiry,
+  # not instantly - so the handlers must still treat an expired item as absent
+  # rather than trusting the sweep to have run.
   ttl {
     attribute_name = "expiresAt"
     enabled        = true

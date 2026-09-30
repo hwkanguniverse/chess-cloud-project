@@ -47,7 +47,7 @@ sqs = boto3.client("sqs")
 # runtime, and the same ID rides in every message this call queues.
 log = logging.getLogger()
 
-PLATFORM_RE = re.compile(r"^(chesscom|lichess)$")
+PLATFORM_RE = re.compile(r"^chesscom$")
 USERNAME_RE = re.compile(r"^[a-zA-Z0-9_-]{1,50}$")
 
 # Per time control, newest first. Overall would be wrong: a player's last 100
