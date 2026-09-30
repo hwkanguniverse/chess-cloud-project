@@ -241,6 +241,14 @@ export default function Player() {
         setAnalyseError(
           `Analysis limit reached. Try again in about ${mins} ${mins === 1 ? "minute" : "minutes"}.`,
         );
+      } else if (err instanceof ApiError && err.status === 503) {
+        // The global daily cap, not this user's bucket - nobody's token was
+        // spent, and it resets at 00:00 UTC for everyone.
+        const body = err.body as { retryAfter?: number } | undefined;
+        const hours = Math.ceil((body?.retryAfter ?? 86400) / 3600);
+        setAnalyseError(
+          `Today's analysis capacity is used up. It resets in about ${hours} ${hours === 1 ? "hour" : "hours"}.`,
+        );
       } else if (err instanceof ApiError && err.status === 401) {
         setAnalyseError("Sign in to analyse a player.");
       } else {

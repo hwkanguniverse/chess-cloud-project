@@ -262,6 +262,66 @@ def release_claim(pk):
         pass
 
 
+# A ceiling on games queued per UTC day across *every* account. The token
+# bucket bounds one account, and accounts are free - so until this existed the
+# worst case was (accounts x ~$2.40/day), unbounded, and the budget alert
+# would only have emailed about it. Counted in games rather than requests
+# because games are what cost money (~$0.0003 each, re-measured against the
+# bill), so the cap is a cap in dollars: 3,000 games is ~$1/day at worst.
+#
+# A counter, which Phase E's derive-on-read rule usually forbids - but that
+# rule is about stored *results* many writers would race to accumulate. This
+# is admission control: one conditional write per request is the decision,
+# exactly like the token bucket, and a lost race is a refusal, not drift.
+DAILY_GAME_CAP = int(os.environ.get("ANALYSE_DAILY_GAME_CAP", "3000"))
+
+
+def take_capacity(games, now=None):
+    """Reserve `games` of today's global capacity, or refuse.
+
+    Returns (day, retry_after_seconds): day is the key to release against if
+    the request fails later, or None when refused.
+
+    DynamoDB conditions cannot do arithmetic, so "used + games <= cap" is
+    written as "used <= cap - games" with the right-hand side computed here.
+    One conditional UpdateItem, so two parallel requests cannot both take the
+    last of the day. The item expires two days after its day ends.
+    """
+    now = int(time.time()) if now is None else now
+    day = time.strftime("%Y-%m-%d", time.gmtime(now))
+    midnight = now - now % 86400 + 86400
+    try:
+        table.update_item(
+            Key={"PK": "GLOBAL#analyse", "SK": f"DAY#{day}"},
+            UpdateExpression="ADD games :n SET expiresAt = if_not_exists(expiresAt, :x)",
+            ConditionExpression="attribute_not_exists(games) OR games <= :room",
+            ExpressionAttributeValues={
+                ":n": games,
+                ":room": DAILY_GAME_CAP - games,
+                ":x": midnight + 2 * 86400,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConditionalCheckFailedException":
+            raise
+        return None, max(1, midnight - now)
+    return day, 0
+
+
+def release_capacity(day, games):
+    """Give back a reservation whose run never started - the caller was then
+    refused by their own token bucket. Best effort, like release_claim: a
+    failed release under-uses the day's cap, which errs the safe way."""
+    try:
+        table.update_item(
+            Key={"PK": "GLOBAL#analyse", "SK": f"DAY#{day}"},
+            UpdateExpression="ADD games :n",
+            ExpressionAttributeValues={":n": -games},
+        )
+    except ClientError:
+        pass
+
+
 def _response(status, body):
     return {
         "statusCode": status,
@@ -458,9 +518,33 @@ def handler(event, context):
     # skipped games evaluated at this depth, so a player who is fully analysed
     # reaches here with an empty todo and pays nothing - which is what keeps
     # re-submission free and is the reason verification could be cut.
+    # The global cap before the caller's own token, so a full day refuses
+    # without charging anyone - a token is spent only on work that will run.
+    # Released below if the token then refuses.
+    if todo:
+        day, retry_after = take_capacity(len(todo))
+        if day is None:
+            release_claim(pk)
+            log.warning(
+                f"daily capacity reached, refused {len(todo)} games for {pk}",
+                extra={"event": "analyse_capacity_reached", "pk": pk, "games": len(todo)},
+            )
+            return _response(
+                503,
+                {
+                    "error": "daily analysis capacity reached",
+                    "hint": (
+                        "New analysis is limited per day across all users and "
+                        "resets at 00:00 UTC. Already-analysed players are always free."
+                    ),
+                    "retryAfter": retry_after,
+                },
+            )
+
     if todo:
         allowed, retry_after = take_token(user_id)
         if not allowed:
+            release_capacity(day, len(todo))
             # Nothing was queued, so the claim written moments ago describes a
             # run that is not happening. Leaving it would lock the player out
             # for the full window on a request that did no work - and the user
