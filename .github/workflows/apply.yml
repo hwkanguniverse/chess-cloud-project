@@ -41,6 +41,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the image tag is read from history
 
       - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
         with:
@@ -51,6 +53,27 @@ jobs:
         with:
           terraform_version: 1.15.8
           terraform_wrapper: false
+
+      # The worker image is tagged with the last commit that changed
+      # app/worker/, so the task definition names the exact code it runs and a
+      # rollback is a revert. Built before any root is applied: the worker
+      # root points both services at this tag, so the image must exist first.
+      # Skipped when the tag is already in ECR - tags are immutable, and a
+      # rebuild of the same commit could only differ by accident.
+      - name: Build and push the worker image
+        run: |
+          tag=$(git log -1 --format=%H -- app/worker | cut -c1-12)
+          echo "TF_VAR_image_tag=$tag" >> "$GITHUB_ENV"
+          repo=961868442307.dkr.ecr.ap-southeast-1.amazonaws.com/chess-cloud-worker
+          if aws ecr describe-images --repository-name chess-cloud-worker --image-ids imageTag="$tag" >/dev/null 2>&1; then
+            echo "image $tag already in ECR, not rebuilding"
+            exit 0
+          fi
+          aws ecr get-login-password | docker login --username AWS --password-stdin "${repo%%/*}"
+          docker build -t "$repo:$tag" app/worker
+          # The pin is the point of the build - prove it held.
+          test "$(docker run --rm --entrypoint dpkg-query "$repo:$tag" -W -f='${Version}' stockfish)" = "17-1"
+          docker push "$repo:$tag"
 
       # Stops at the first root that fails: later roots read its outputs, and
       # applying them against a half-applied dependency is how a partial
