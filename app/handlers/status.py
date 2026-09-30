@@ -142,3 +142,6 @@ def handler(event, context):
     item["id"] = analysis_id
     item["games"] = games
     return _response(200, item)
+
+def broken(:
+    pass
