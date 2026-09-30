@@ -543,8 +543,11 @@ resource "aws_iam_role_policy" "players" {
         # account adds ~200 archive items that this route must read on every
         # call. The fix is a GSI keyed for listing, at which point this becomes
         # Query and the permission goes back to matching every other read role.
-        Action   = ["dynamodb:Scan"]
-        Resource = local.table_arn
+        Action = ["dynamodb:Scan"]
+        # The directory index, granted a PR ahead of the code that reads it -
+        # Phase 4's outage came from a grant and its first use going out in
+        # one apply. The table grant goes when the route has moved over.
+        Resource = [local.table_arn, "${local.table_arn}/index/directory"]
       },
       {
         Effect   = "Allow"
