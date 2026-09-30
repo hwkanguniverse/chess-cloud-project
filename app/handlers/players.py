@@ -8,8 +8,9 @@ It used to Scan the *table*, which PHASE-3 accepted as temporary: a Scan reads
 every item to find the few that match, so its cost grew with games ingested,
 not with players. Once games became their own items that stopped being
 theoretical - on 30 Sep the table held 203 month items among 83,427, the
-20-page limit below stopped after two of six players, and the page said the
-list was incomplete. Hikaru, 70,344 games, was one of the four missing.
+20-page limit below stopped after two of the three players, and the page said
+the list was incomplete. The one missing was hikaru, with 70,344 games. On the
+index the same listing is one page, 9 read units, all three.
 
 Now it Scans the `directory` index instead: every month item and nothing
 else (see terraform/data), so the read is ~200 small entries however many

@@ -131,8 +131,8 @@ resource "aws_dynamodb_table" "games" {
   # directory: every player-month, and nothing else - what GET /players lists.
   # Until this existed that route Scanned the whole table for the month items
   # scattered among the games: 203 months among 83,427 items on 30 Sep, so its
-  # 20-page safety limit stopped after two of six players and the page said
-  # the list was incomplete. PHASE-3 planned this index and deferred it until
+  # 20-page safety limit stopped after two of the three players - missing
+  # hikaru, the largest - and the page said the list was incomplete. PHASE-3 planned this index and deferred it until
   # the Scan could be watched failing; it has been.
   #
   # Keyed on `archive` ("2026-09") because every month item already carries it
