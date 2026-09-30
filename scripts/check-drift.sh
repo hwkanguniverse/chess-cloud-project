@@ -163,6 +163,33 @@ FC=$(aws budgets describe-notifications-for-budget \
   --query "length(Notifications[?NotificationType=='FORECASTED'])" --output text 2>/dev/null || echo 0)
 [ "$FC" != "0" ] && ok "forecast alert set" || flag "no FORECASTED alert - you learn about overspend after the fact"
 
+# The alert path, checked link by link along the way an alert travels,
+# because each link fails silently - a missing alarm, actions disabled (left
+# over from a drill), an action pointing at the wrong topic, or a subscription
+# never confirmed all leave the alarm free to fire into nothing.
+alert_path() {
+  local ALARM="$1" WHY="$2" ENABLED TOPIC CONFIRMED
+  read -r ENABLED TOPIC <<<"$(aws cloudwatch describe-alarms --alarm-names "$ALARM" \
+    --region "$REGION" --query 'MetricAlarms[0].[ActionsEnabled,AlarmActions[0]]' \
+    --output text 2>/dev/null)"
+  if [ -z "$ENABLED" ] || [ "$ENABLED" = "None" ]; then
+    flag "no alarm $ALARM - $WHY"
+    return
+  fi
+  [ "$ENABLED" = "True" ] && ok "alarm exists, actions enabled" \
+    || flag "$ALARM has actions disabled - it can go to ALARM and tell no one"
+  case "$TOPIC" in
+    arn:aws:sns:*) ;;
+    *) flag "$ALARM has no SNS action - it notifies no one"; return ;;
+  esac
+  CONFIRMED=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --region "$REGION" \
+    --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" \
+    --output text 2>/dev/null || echo 0)
+  [ "${CONFIRMED:-0}" != "0" ] && [ "$CONFIRMED" != "None" ] \
+    && ok "notifies ${TOPIC##*:}, $CONFIRMED confirmed subscription(s)" \
+    || flag "$ALARM notifies ${TOPIC##*:}, which has no confirmed subscription - alerts are dropped"
+}
+
 # The DLQ must exist and be wired up. A queue whose redrive policy is missing
 # looks identical to a working one until a poison message arrives.
 #
@@ -207,33 +234,65 @@ for Q in chess-cloud-analysis chess-cloud-analysis-eval; do
     fi
   fi
 
-  # The alarm is the load-bearing part of Phase 4: it is what turns a dead
-  # message into an email instead of a silent 14-day expiry. Checked link by
-  # link along the path an alert travels, because each link fails silently -
-  # a missing alarm, actions disabled (left over from a drill), an action
-  # pointing at the wrong topic, or a subscription never confirmed all leave
-  # the alarm free to fire into nothing.
-  ALARM="$DLQ-not-empty"
-  read -r ENABLED TOPIC <<<"$(aws cloudwatch describe-alarms --alarm-names "$ALARM" \
-    --region "$REGION" --query 'MetricAlarms[0].[ActionsEnabled,AlarmActions[0]]' \
-    --output text 2>/dev/null)"
-  if [ -z "$ENABLED" ] || [ "$ENABLED" = "None" ]; then
-    flag "no alarm $ALARM - a dead message would sit unnoticed until it expires"
-    continue
-  fi
-  [ "$ENABLED" = "True" ] && ok "alarm exists, actions enabled" \
-    || flag "$ALARM has actions disabled - it can go to ALARM and tell no one"
-  case "$TOPIC" in
-    arn:aws:sns:*) ;;
-    *) flag "$ALARM has no SNS action - it notifies no one"; continue ;;
-  esac
-  CONFIRMED=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC" --region "$REGION" \
-    --query "length(Subscriptions[?SubscriptionArn!='PendingConfirmation'])" \
-    --output text 2>/dev/null || echo 0)
-  [ "${CONFIRMED:-0}" != "0" ] && [ "$CONFIRMED" != "None" ] \
-    && ok "notifies ${TOPIC##*:}, $CONFIRMED confirmed subscription(s)" \
-    || flag "$ALARM notifies ${TOPIC##*:}, which has no confirmed subscription - alerts are dropped"
+  alert_path "$DLQ-not-empty" "a dead message would sit unnoticed until it expires"
 done
+
+# Phase 4's other alarm. Until Phase 5 this was claimed as drift-checked and
+# was not - found while extending this script.
+echo "Lambda errors alarm (any function erroring or timing out):"
+alert_path chess-cloud-lambda-errors "a crashing or timing-out Lambda would tell no one"
+
+# The CI roles' trust policies are the control on who can deploy: the apply
+# role is AdministratorAccess by decision, so its trust is the account's front
+# door with no MFA behind it. The failure worth catching is a *loosening* -
+# a StringLike, a wildcard, a second subject - because every workflow would
+# keep working perfectly, the failure that looks like success. So this does
+# not ask "can CI still deploy" (the pipeline answers that) but "can anything
+# else": exact operator, exact subject, one statement, and no other role
+# trusting GitHub at all.
+echo "CI trust (who can assume the deploy roles):"
+GH_SUB="repo:hwkanguniverse@8513534/chess-cloud-project@1332943637"
+GH_PROVIDER="arn:aws:iam::$ACCT:oidc-provider/token.actions.githubusercontent.com"
+AUD=$(aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$GH_PROVIDER" \
+  --query 'ClientIDList' --output text 2>/dev/null)
+[ "$AUD" = "sts.amazonaws.com" ] && ok "GitHub OIDC provider, audience sts only" \
+  || flag "GitHub OIDC provider missing or audience is '$AUD'"
+
+# role : subject it must trust : the one managed policy it may hold
+for PAIR in "chess-cloud-ci-plan:$GH_SUB:pull_request:ReadOnlyAccess" \
+            "chess-cloud-ci-apply:$GH_SUB:ref:refs/heads/main:AdministratorAccess"; do
+  ROLE=${PAIR%%:*}; REST=${PAIR#*:}; POLICY=${REST##*:}; WANT=${REST%:*}
+  DOC=Role.AssumeRolePolicyDocument
+  read -r N EFFECT ACTION FED OPS KEYS <<<"$(aws iam get-role --role-name "$ROLE" --output text \
+    --query "[length($DOC.Statement), $DOC.Statement[0].Effect, $DOC.Statement[0].Action,
+              $DOC.Statement[0].Principal.Federated,
+              join(',', keys($DOC.Statement[0].Condition)),
+              join(',', sort(keys($DOC.Statement[0].Condition.StringEquals)))]" 2>/dev/null)"
+  SUB=$(aws iam get-role --role-name "$ROLE" --output text \
+    --query "$DOC.Statement[0].Condition.StringEquals.\"token.actions.githubusercontent.com:sub\"" 2>/dev/null)
+  if [ -z "$N" ]; then flag "$ROLE is missing"; continue; fi
+  if [ "$N" = 1 ] && [ "$EFFECT" = Allow ] && [ "$ACTION" = sts:AssumeRoleWithWebIdentity ] \
+    && [ "$FED" = "$GH_PROVIDER" ] && [ "$OPS" = StringEquals ] \
+    && [ "$KEYS" = "token.actions.githubusercontent.com:aud,token.actions.githubusercontent.com:sub" ] \
+    && [ "$SUB" = "$WANT" ]; then
+    ok "$ROLE trusts exactly ${WANT#"$GH_SUB":}"
+  else
+    flag "$ROLE trust is not exactly StringEquals on '$WANT' (statements=$N operators=$OPS sub=$SUB)"
+  fi
+
+  GOT=$(aws iam list-attached-role-policies --role-name "$ROLE" --output text \
+    --query 'join(`,`, AttachedPolicies[].PolicyName)' 2>/dev/null)
+  INLINE=$(aws iam list-role-policies --role-name "$ROLE" --output text \
+    --query 'length(PolicyNames)' 2>/dev/null)
+  [ "$GOT" = "$POLICY" ] && [ "$INLINE" = 0 ] && ok "$ROLE has $POLICY only" \
+    || flag "$ROLE policies are '$GOT' plus $INLINE inline, expected $POLICY only"
+done
+
+OTHERS=$(aws iam list-roles --output text --query \
+  "Roles[?contains(to_string(AssumeRolePolicyDocument), 'token.actions.githubusercontent.com')
+         && RoleName!='chess-cloud-ci-plan' && RoleName!='chess-cloud-ci-apply'].RoleName" 2>/dev/null)
+[ -z "$OTHERS" ] && ok "no other role trusts GitHub" \
+  || flag "other role(s) trust GitHub's OIDC provider: $OTHERS"
 
 echo
 [ "$FAIL" = "0" ] && echo "No drift." || echo "Drift found - reconcile with the skill or log it in CLAUDE.md."
