@@ -266,39 +266,45 @@ locals {
 # boto3 ships in the Lambda runtime; no dependency layer needed.
 
 data "archive_file" "submit" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/submit.py"
-  output_path = "${path.module}/build/submit.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/submit.py"
+  output_path      = "${path.module}/build/submit.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "analyse" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/analyse.py"
-  output_path = "${path.module}/build/analyse.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/analyse.py"
+  output_path      = "${path.module}/build/analyse.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "status" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/status.py"
-  output_path = "${path.module}/build/status.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/status.py"
+  output_path      = "${path.module}/build/status.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "link" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/link.py"
-  output_path = "${path.module}/build/link.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/link.py"
+  output_path      = "${path.module}/build/link.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "player" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/player.py"
-  output_path = "${path.module}/build/player.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/player.py"
+  output_path      = "${path.module}/build/player.zip"
+  output_file_mode = "0644"
 }
 
 data "archive_file" "players" {
-  type        = "zip"
-  source_file = "${local.handlers_dir}/players.py"
-  output_path = "${path.module}/build/players.zip"
+  type             = "zip"
+  source_file      = "${local.handlers_dir}/players.py"
+  output_path      = "${path.module}/build/players.zip"
+  output_file_mode = "0644"
 }
 
 # --- Logs ------------------------------------------------------------------
