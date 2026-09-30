@@ -113,6 +113,7 @@ variable "allowed_origins" {
   type        = list(string)
   default = [
     "http://localhost:5173",
+    "https://chess.hoowenkang.com",
   ]
 }
 
