@@ -78,7 +78,7 @@ Each has a real trade-off.
 Ordered so each piece is verifiable before the next depends on it.
 
 - [x] **A `ci` root, applied by hand:** the GitHub OIDC provider and the plan and apply roles. The one unavoidable chicken-and-egg — CI cannot create the role it assumes — so, like `bootstrap`, it stays a manual apply. *Applied 30 Sep: OIDC provider, `chess-cloud-ci-plan` (`ReadOnlyAccess`, subject `pull_request`), `chess-cloud-ci-apply` (`AdministratorAccess`, subject `ref:refs/heads/main`), both `StringEquals` on `aud` and `sub`. Neither refusal is drilled yet.*
-- [ ] **Pin line endings** with `.gitattributes`, so a Lambda zip is byte-identical whether built on Windows or Linux — then a break-glass laptop apply does not redeploy every function.
+- [x] **Pin line endings** with `.gitattributes`, so a Lambda zip is byte-identical whether built on Windows or Linux — then a break-glass laptop apply does not redeploy every function. *Done 30 Sep. **Four** Lambdas, not six, were deployed with CRLF — confirmed by downloading the live code: `player.py` held 311 CR bytes, `status.py` none. The endings depended on which tool last wrote each file, not on the machine. A laptop plan now shows exactly those four as `source_code_hash`-only changes, which the first CI apply will make once.*
 - [ ] **Push the repo**, and a first workflow that only *plans*, with the read-only role. Seen producing the expected result: no changes, or exactly the CRLF Lambda diff and nothing else.
 - [ ] **Pre-apply checks** on every PR: the Python compile check, and the unit test that player's and analyse's selection agree — seen failing on a deliberate break before trusted.
 - [ ] **The apply workflow**, running the roots in dependency order, ending in the **post-deploy smoke test**.
