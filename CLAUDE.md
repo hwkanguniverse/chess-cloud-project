@@ -10,7 +10,7 @@ Previous phases: [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PHASE-3.md
 
 **Owed from earlier phases:**
 - **Phase F's hosting is still blocked on choosing a domain** — CORS, the browser drills and the public launch all wait behind it.
-- **Going public — the site *or* the repo — first needs Phase E's global daily ceiling.** Self sign-up is on, accounts are free, and each can spend ~$2.40/day under the per-account bucket. It is a cost control, which is this phase's subject, so whether it is built here is one of the decisions below.
+- ~~**Going public — the site *or* the repo — first needs Phase E's global daily ceiling.**~~ *Built and drilled 30 Sep (PR #9) — see the decision log.*
 
 Account: `961868442307` · Region: `ap-southeast-1` · IAM user: `terraform-admin` (MFA enabled, break-glass since Phase 5)
 
@@ -56,7 +56,7 @@ The `aws-cert-plan` skill is the source of truth for architecture and cost decis
 - **Data goes stale unless someone re-submits.** Submit refreshes the live month; nothing happens on a clock. There is no schedule of any kind.
 - **Nothing consumes table changes.** No Streams; the design derives everything on read (Phase E's rule: recompute, never accumulate).
 - **Costs are measured per unit, not per month.** Evaluation ~$0.10 per 300-game player (re-measured against the bill, 30 Sep); ingestion ~$0.03 per first full history; CI ~9 Actions minutes per change; ECR ~$0.07/month. There is no whole-system monthly breakdown by service, and credits have hidden the real bill so far.
-- **The spending controls are per account only.** The token bucket bounds one account; nothing bounds all of them.
+- ~~**The spending controls are per account only.**~~ *A global daily cap on games now bounds all accounts together (30 Sep).*
 
 ---
 
@@ -67,7 +67,7 @@ Each has a real trade-off.
 - [ ] **The load test: what question does it answer?** Candidates: *"what are p50/p99 for the read API at realistic load"*; *"where does it break, and how"* (the throttle's 429s, Lambda concurrency, DynamoDB); *"can it survive a launch-day spike"*. Also: which routes (read only — see above), which players (a small one and hikaru behave differently), from where (laptop or CI), and how hard — past the throttle is the only way to see it work.
 - [ ] **DynamoDB Streams: name the failure mode, or cut it.** Candidates that exist in principle: pushing "analysis done" to a waiting page instead of polling; recomputing an aggregate when a game lands. The second contradicts derive-on-read. If nothing here is broken without it, cutting it is the answer the rule gives — and it is a stronger interview line than building it.
 - [ ] **EventBridge schedule: for what?** Candidates: a daily refresh of each tracked player's live month, so profiles stay current without a re-submit (freshness; costs ingestion time and serialised Chess.com calls per player per day); a nightly drift/plan run (Phase 5 rejected it — revisit only with a new reason); nothing.
-- [ ] **The global daily ceiling: this phase, or not?** It is the missing control between this project and going public, and a cost control. **Options: build it here; leave it to Phase F's launch.**
+- [x] **The global daily ceiling: this phase, or not?** *Decided and built 30 Sep, ahead of the rest of this phase, as the precondition for hosting — see the decision log.* It is the missing control between this project and going public, and a cost control. **Options: build it here; leave it to Phase F's launch.**
 - [ ] **The cost breakdown: what is the deliverable?** A per-service monthly table from Cost Explorer, before and after credits, with the drivers named — and where it lives (the skill's cost model, so the interview answer has one home).
 
 ## To build
@@ -111,7 +111,7 @@ Earlier decisions are in [PHASE-1.md](PHASE-1.md), [PHASE-2.md](PHASE-2.md), [PH
 
 | Decision | Chosen | Rejected | Why |
 |---|---|---|---|
-| *(none yet)* | | | |
+| Global daily cap | **3,000 games queued per UTC day across all accounts** (~$1/day worst case, ~$30/month if hit daily). `analyse` reserves `len(todo)` games on `GLOBAL#analyse / DAY#<date>` in one conditional `UpdateItem` — *before* the caller's token, so a full day charges nobody — and returns **503** with `retryAfter` to 00:00 UTC; released if the token then refuses | 1,500 or 6,000 games/day; leave it to the launch; cap requests rather than games | The per-account bucket cannot bound total spend while accounts are free — the hole Phase E named and Phase F's earlier spending-stop cut predated. Games, not requests, because games are the cost, so the cap is a cap in dollars. A counter does not break derive-on-read: that rule is about stored *results*; this is admission control, like the bucket. No new IAM, so it could not repeat Phase 4's grant-and-code outage. **Drilled 30 Sep:** counter set to 2,999 → theohwk's 14 games refused with 503, counter unchanged, token bucket untouched, claim released, queue empty; counter deleted → 202, 14 queued, counter 14, bucket 5 → 4 |
 
 ---
 
