@@ -103,7 +103,7 @@ Earlier phases' deviations are in their own files and still stand.
 
 | Deviation | Skill says | We did | Why |
 |---|---|---|---|
-| *(none yet)* | | | |
+| Account linking removed | *"Identity is two problems, not one"* — per-platform linking, Lichess OAuth PKCE verified, Chess.com unverified; built in Phase 2 | **Removed on 30 Sep:** `link.py`, its Lambda, role, log group and four routes; `lichess` dropped from the read routes' platform check | Linking existed to prove ownership, and Phase E cut verification because analysis is public — so ownership proves nothing the data does not give. The web app never called any link route, the table held **zero** link items, and the Lambda last ran on 19 Aug. It was also the only unauthenticated callback route and the only code calling lichess.org. Named-failure rule: nothing breaks without it. The Phase 2 reasoning stands as a record of what was built and why |
 
 ## Decision log
 

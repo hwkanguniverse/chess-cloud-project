@@ -33,7 +33,7 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 log = logging.getLogger()
 
-PLATFORM_RE = re.compile(r"^(chesscom|lichess)$")
+PLATFORM_RE = re.compile(r"^chesscom$")
 USERNAME_RE = re.compile(r"^[a-z0-9_-]{1,50}$")
 
 # Evaluation state is *derived* from the game items, never stored on the month.
