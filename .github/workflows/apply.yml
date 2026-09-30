@@ -14,6 +14,7 @@ on:
       - "terraform/**"
       - "app/**"
       - "tests/**"
+      - "scripts/**"
       - ".github/workflows/**"
   workflow_dispatch: # re-run by hand, e.g. after a failed apply
 
@@ -103,3 +104,10 @@ jobs:
           done
           echo "::error::API not healthy two minutes after apply"
           exit 1
+
+      # Last, so it sees what this apply left behind. Replaces "run it by
+      # hand after every apply", which depended on remembering. Checks the
+      # invariants a plan cannot see as wrong - scale-to-zero, the VPC, the
+      # alert path, and the trust on the role this job is running as.
+      - name: Drift check
+        run: bash scripts/check-drift.sh

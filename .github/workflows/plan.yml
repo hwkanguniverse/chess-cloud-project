@@ -16,6 +16,7 @@ on:
       - "terraform/**"
       - "app/**"
       - "tests/**"
+      - "scripts/**"
       - ".github/workflows/**"
 
 permissions:
