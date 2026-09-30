@@ -106,7 +106,7 @@ Same standard as every prior phase: watched live, not asserted.
 - [ ] **A broken change stops before it applies** → a deliberate `terraform validate` or plan failure, and nothing reaches AWS.
 - [ ] **An apply fails partway through the roots** → what state is each root left in, and does re-running converge?
 - [ ] **Two pushes close together** → two runs against one state. Does the concurrency setting or the S3 lock stop them, and which one wins?
-- [ ] **A worker change deploys the code it claims to** → the running task names the image, the image contains the change. The Phase E check, automated.
+- [x] **A worker change deploys the code it claims to** → the running task names the image, the image contains the change. The Phase E check, automated. *Done 30 Sep — see the worker image item above: the ingestion task ran the SHA-tagged revision with the exact digest CI pushed, and logged a real fetch.*
 - [ ] **Phase 4's IAM-then-code outage** → does the pipeline's apply order reproduce it, and if so what prevents it?
 
 ## Cost controls
