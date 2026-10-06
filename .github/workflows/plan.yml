@@ -32,7 +32,7 @@ concurrency:
 env:
   # Dependency order. bootstrap and ci are applied by hand and never planned
   # here: CI must not be able to touch the state bucket or its own trust.
-  ROOTS: guardrails network data queue auth worker api
+  ROOTS: guardrails network data queue auth worker api web
 
 jobs:
   # Runs beside the plan rather than before it, so a failing check still
