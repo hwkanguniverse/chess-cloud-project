@@ -6,6 +6,9 @@
 #             request. Terraform zips whatever it is given; the plan looks fine.
 #   unittest  player.py and analyse.py selecting different games - see
 #             tests/test_selection.py.
+#   web       a type error or broken import in the app. apply builds it only
+#             after the roots are applied, so without this a bad commit would
+#             change the infrastructure and then fail to ship the app.
 
 name: checks
 
@@ -34,3 +37,13 @@ jobs:
         run: |
           pip install --quiet boto3==1.43.72
           python -m unittest discover -s tests -v
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: The web app builds
+        working-directory: web
+        run: npm ci && npm run build

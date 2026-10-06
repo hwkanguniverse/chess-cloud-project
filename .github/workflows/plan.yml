@@ -15,6 +15,7 @@ on:
     paths:
       - "terraform/**"
       - "app/**"
+      - "web/**"
       - "tests/**"
       - "scripts/**"
       - ".github/workflows/**"

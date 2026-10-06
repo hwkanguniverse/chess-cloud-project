@@ -13,6 +13,7 @@ on:
     paths:
       - "terraform/**"
       - "app/**"
+      - "web/**"
       - "tests/**"
       - "scripts/**"
       - ".github/workflows/**"
@@ -88,6 +89,37 @@ jobs:
             echo "::endgroup::"
           done
 
+      # Terraform owns the bucket and distribution; this owns what is in them.
+      # Built here rather than committed, from the live stack's outputs, so the
+      # bundle can never point at an API or user pool that does not exist.
+      # Hashed assets are cached for a year - a new build has new names - and
+      # index.html is never cached, so one invalidation of it is the whole
+      # rollout. Invalidating /* instead would spend the free 1,000 paths/month
+      # on files that cannot be stale.
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build and publish the web app
+        working-directory: web
+        run: |
+          export VITE_API_URL=$(terraform -chdir=../terraform/api output -raw api_endpoint)
+          export VITE_USER_POOL_ID=$(terraform -chdir=../terraform/auth output -raw user_pool_id)
+          export VITE_USER_POOL_CLIENT_ID=$(terraform -chdir=../terraform/auth output -raw user_pool_client_id)
+          npm ci
+          npm run build
+          bucket=$(terraform -chdir=../terraform/web output -raw bucket)
+          aws s3 sync dist/assets "s3://$bucket/assets" --cache-control "public, max-age=31536000, immutable"
+          aws s3 sync dist "s3://$bucket" --delete --exclude "assets/*" --cache-control "no-cache"
+          # Old hashed assets go last, so a browser holding the previous
+          # index.html can still fetch what it references until it reloads.
+          aws s3 sync dist/assets "s3://$bucket/assets" --delete
+          aws cloudfront create-invalidation \
+            --distribution-id "$(terraform -chdir=../terraform/web output -raw distribution_id)" \
+            --paths /index.html
+
       # A green apply is not a working app. Phase 4's outage was exactly this:
       # the apply succeeded and every /player returned 500 for five minutes
       # while an IAM grant propagated. Retries cover normal propagation; an
@@ -95,11 +127,15 @@ jobs:
       - name: Smoke test the API
         run: |
           api=$(terraform -chdir=terraform/api output -raw api_endpoint)
+          site=$(terraform -chdir=terraform/web output -raw url)
           for attempt in $(seq 1 12); do
             players=$(curl -s -o /dev/null -w '%{http_code}' "$api/players")
             player=$(curl -s -o /dev/null -w '%{http_code}' "$api/player/chesscom/hikaru")
-            echo "attempt $attempt: /players $players, /player/chesscom/hikaru $player"
-            if [ "$players" = 200 ] && [ "$player" = 200 ]; then exit 0; fi
+            # A deep link, not /: it must come back as the app (SPA fallback),
+            # not as S3's 403.
+            web=$(curl -s -o /dev/null -w '%{http_code}' "$site/player/chesscom/hikaru")
+            echo "attempt $attempt: /players $players, /player/chesscom/hikaru $player, site deep link $web"
+            if [ "$players" = 200 ] && [ "$player" = 200 ] && [ "$web" = 200 ]; then exit 0; fi
             sleep 10
           done
           echo "::error::API not healthy two minutes after apply"
