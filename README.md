@@ -1,5 +1,7 @@
 # chess-cloud
 
+**Live: [chess.hoowenkang.com](https://chess.hoowenkang.com)**
+
 **Chess.com Insights, rebuilt as a distributed system on AWS.** Enter a Chess.com username; the system pulls the player's entire game history, runs Stockfish over their recent games, and shows where their mistakes actually happen.
 
 The chess is the payload. The point is the system around it: a job queue with at-least-once delivery, scale-to-zero workers, an upstream API that must never see parallel requests, and a monthly bill measured in cents. Everything is Terraform, deployed by GitHub Actions with no long-lived AWS keys.
@@ -45,7 +47,8 @@ flowchart LR
 | Data | DynamoDB, single table, one sparse GSI | Fixed access patterns make DynamoDB the *better* answer, not just the cheaper one — no joins, no ad-hoc queries |
 | Network | Custom VPC, public subnets, no-ingress security group, free gateway endpoints | Private subnets would cost a ~$32/month NAT (16× the budget) to protect tasks nothing can already reach |
 | Ops | JSON logs with request IDs, a metric filter, alarms → SNS, X-Ray on the Lambdas, a drift check | Each one answers a named question; there is deliberately no dashboard |
-| Delivery | Terraform (9 roots), GitHub Actions with OIDC federation | No AWS credential exists in GitHub |
+| Frontend | React on GitHub Pages, DNS in a Route 53 hosted zone | Built for S3 + CloudFront + ACM, which are written and wait on AWS verifying the account (see Limits) |
+| Delivery | Terraform (10 roots), GitHub Actions with OIDC federation | No AWS credential exists in GitHub |
 
 ## Numbers
 
@@ -120,6 +123,7 @@ In phases, each with its decisions, rejected alternatives, and failure drills wr
 
 ## Limits, stated
 
+- **The frontend is outside AWS for now.** The account is unverified, so AWS refused both the domain registration and the CloudFront distribution. The domain is registered at Porkbun with its DNS in Route 53, and GitHub Pages serves the app. The S3 bucket and ACM certificate exist, and one Terraform variable switches to CloudFront once AWS verifies the account.
 - **Chess.com only.** Lichess has no archive-list endpoint to walk, so ingesting it would be a different design.
 - **Horizontal ingestion scaling is unresolved, not unbuilt.** It waits on confirming Chess.com's real limit, not on a mechanism.
 - **Scale-to-zero costs latency.** SQS metrics lag ~5 minutes, so the first task can take 1–5 minutes to start. That is the accepted price of a near-zero bill.
