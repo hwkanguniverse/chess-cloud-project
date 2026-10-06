@@ -106,7 +106,7 @@ variable "cloudfront_enabled" {
 variable "github_pages_verification" {
   description = "TXT value for _github-pages-challenge-<owner>.<domain>."
   type        = string
-  default     = ""
+  default     = "fc47604f1d87fd5b38b54a5b63348e"
 }
 
 variable "github_owner" {
