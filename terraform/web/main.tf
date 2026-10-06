@@ -1,7 +1,8 @@
 # Web: where the browser app is served from - chess.hoowenkang.com.
 #
-# A private S3 bucket behind CloudFront, with a certificate and DNS in a
-# Route 53 zone this root manages. Decided in Phase F
+# Planned as a private S3 bucket behind CloudFront, with a certificate and DNS
+# in a Route 53 zone this root manages. Served from GitHub Pages until the
+# account is verified for CloudFront - see cloudfront_enabled. Decided in Phase F
 # (see PHASE-F.md, "Hosting"): S3 website hosting alone is HTTP-only, and a
 # login flow needs HTTPS on a real origin.
 #
@@ -86,6 +87,34 @@ variable "app_subdomain" {
   default     = "chess"
 }
 
+# Off until AWS Support verifies the account. Creating the distribution was
+# refused with "Your account must be verified before you can add new
+# CloudFront resources" - the same block that refused the Route 53
+# registration. Until then the app is served by GitHub Pages through a CNAME
+# below. The bucket, origin access control and certificate stay: they cost
+# nothing idle, and turning this on is the whole switch back.
+variable "cloudfront_enabled" {
+  description = "Serve the app from CloudFront (true) or GitHub Pages (false)."
+  type        = bool
+  default     = false
+}
+
+# GitHub's domain-verification TXT value, from github.com/settings/pages.
+# Not a secret - it is published in DNS. Verifying the domain on the account
+# stops anyone else claiming chess.hoowenkang.com for their own Pages site if
+# ours is ever switched off while the CNAME still points at GitHub.
+variable "github_pages_verification" {
+  description = "TXT value for _github-pages-challenge-<owner>.<domain>."
+  type        = string
+  default     = "fc47604f1d87fd5b38b54a5b63348e"
+}
+
+variable "github_owner" {
+  description = "GitHub account that publishes the Pages site."
+  type        = string
+  default     = "hwkanguniverse"
+}
+
 locals {
   app_domain = "${var.app_subdomain}.${var.domain_name}"
 }
@@ -129,6 +158,7 @@ resource "aws_cloudfront_origin_access_control" "site" {
 # Only this distribution may read the bucket - the SourceArn condition is what
 # stops any other CloudFront distribution, in any account, from using it.
 resource "aws_s3_bucket_policy" "site" {
+  count  = var.cloudfront_enabled ? 1 : 0
   bucket = aws_s3_bucket.site.id
   policy = jsonencode({
     Version = "2012-10-17"
@@ -138,7 +168,7 @@ resource "aws_s3_bucket_policy" "site" {
       Action    = "s3:GetObject"
       Resource  = "${aws_s3_bucket.site.arn}/*"
       Condition = {
-        StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.site.arn }
+        StringEquals = { "AWS:SourceArn" = aws_cloudfront_distribution.site[0].arn }
       }
     }]
   })
@@ -180,6 +210,8 @@ resource "aws_acm_certificate_validation" "site" {
 # --- Distribution ----------------------------------------------------------------
 
 resource "aws_cloudfront_distribution" "site" {
+  count = var.cloudfront_enabled ? 1 : 0
+
   enabled             = true
   is_ipv6_enabled     = true
   aliases             = [local.app_domain]
@@ -238,17 +270,39 @@ resource "aws_cloudfront_distribution" "site" {
 # --- DNS -------------------------------------------------------------------------
 
 resource "aws_route53_record" "site" {
-  for_each = toset(["A", "AAAA"])
+  for_each = var.cloudfront_enabled ? toset(["A", "AAAA"]) : toset([])
 
   zone_id = aws_route53_zone.site.zone_id
   name    = local.app_domain
   type    = each.value
 
   alias {
-    name                   = aws_cloudfront_distribution.site.domain_name
-    zone_id                = aws_cloudfront_distribution.site.hosted_zone_id
+    name                   = aws_cloudfront_distribution.site[0].domain_name
+    zone_id                = aws_cloudfront_distribution.site[0].hosted_zone_id
     evaluate_target_health = false
   }
+}
+
+# While CloudFront is off. GitHub serves the app and issues its certificate
+# once this resolves to it.
+resource "aws_route53_record" "pages" {
+  count = var.cloudfront_enabled ? 0 : 1
+
+  zone_id = aws_route53_zone.site.zone_id
+  name    = local.app_domain
+  type    = "CNAME"
+  ttl     = 300
+  records = ["${var.github_owner}.github.io"]
+}
+
+resource "aws_route53_record" "pages_verification" {
+  count = var.github_pages_verification == "" ? 0 : 1
+
+  zone_id = aws_route53_zone.site.zone_id
+  name    = "_github-pages-challenge-${var.github_owner}.${var.domain_name}"
+  type    = "TXT"
+  ttl     = 300
+  records = [var.github_pages_verification]
 }
 
 # --- Outputs ---------------------------------------------------------------------
@@ -267,7 +321,7 @@ output "bucket" {
 }
 
 output "distribution_id" {
-  value = aws_cloudfront_distribution.site.id
+  value = one(aws_cloudfront_distribution.site[*].id)
 }
 
 output "url" {
