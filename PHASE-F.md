@@ -68,17 +68,17 @@ Phase 3 left the backend genuinely ready for this, and the frontend now exists. 
 
 **What it is for:** static files need somewhere to live, and the login flow needs HTTPS on a real domain — S3 website endpoints are HTTP-only, so they cannot serve a Cognito callback.
 
-- [ ] **Route 53 domain** — registered manually (~$12–15/yr depending on TLD). Hosted zone ~$0.50/month.
-- [ ] **ACM certificate** — free, but **must be issued in `us-east-1`** regardless of where everything else lives. CloudFront only reads certificates from there. This is the single most common way this setup fails.
-- [ ] **S3 bucket, private** — no public access, no website hosting. CloudFront reads it through Origin Access Control.
-- [ ] **CloudFront distribution** — HTTPS, custom domain, SPA fallback so client-side routes do not 404 on refresh.
-- [ ] **Deploy step** — `npm run build` then sync to S3, plus a CloudFront invalidation. 1,000 invalidation paths/month are free; more are billable, so invalidate `/*` sparingly.
+- [x] **Domain** — `hoowenkang.com`, registered at **Porkbun** ($11/yr) after Route 53 refused the registration. Delegated to a Terraform-managed Route 53 hosted zone ($0.50/month), checked at the `.com` registry, 6 Oct. See CLAUDE.md, Deviations.
+- [x] **ACM certificate** — *issued and validated 6 Oct; unused until CloudFront is allowed.* free, but **must be issued in `us-east-1`** regardless of where everything else lives. CloudFront only reads certificates from there. This is the single most common way this setup fails.
+- [x] **S3 bucket, private** — *exists, empty until CloudFront is allowed.* no public access, no website hosting. CloudFront reads it through Origin Access Control.
+- [ ] **CloudFront distribution** — *refused: the account must be verified first (AWS Support case open). GitHub Pages serves the app meanwhile; `cloudfront_enabled` switches back.* HTTPS, custom domain, SPA fallback so client-side routes do not 404 on refresh.
+- [x] **Deploy step** — *currently to GitHub Pages, with its own job, smoke-tested on `/` and a deep link. The S3 + invalidation version is in `aeaa843`.* `npm run build` then sync to S3, plus a CloudFront invalidation. 1,000 invalidation paths/month are free; more are billable, so invalidate `/*` sparingly.
 
 ## Security — in this phase, not after it
 
 **What it is for:** each item below is a thing that is currently safe *only because there is one user*.
 
-- [ ] **CORS on the API.** Nothing works in a browser without it. Allow the real origin explicitly — not `*` — since the authenticated routes carry a bearer token.
+- [x] **CORS on the API.** *Live 6 Oct, allowing `https://chess.hoowenkang.com` only (preflight checked).* Nothing works in a browser without it. Allow the real origin explicitly — not `*` — since the authenticated routes carry a bearer token.
 - [x] **Unused Hosted UI deleted, 26 Aug 2026.** Phase 2 built both login paths — SRP for programmatic access and the Hosted UI for browsers. The frontend then used Amplify's `<Authenticator>`, which is SRP, leaving the hosted path a publicly reachable signup page the app did not control. Verified live at `200` before removal and unreachable after. The pool, its users and their `sub`s are untouched: the domain is a front end onto the pool, not the pool itself.
   - **Setting the OAuth attributes empty was a separate step from deleting the domain.** Dropping them from the Terraform config left whatever was last applied in place, so the client went on advertising `allowed_oauth_flows = ["code"]` and a `localhost:3000` callback after the domain was gone. Inert without a domain, but the kind of stale config that misleads whoever reads the console next. Omitting an attribute is not the same as clearing it.
   - **Lichess account linking is untouched.** `link.py` runs its own authorization-code flow against *Lichess* — its own `state`, its own PKCE verifier, its own callback. The name is the only thing it shares with the Cognito path.
