@@ -31,7 +31,7 @@ concurrency:
 env:
   # Dependency order - each reads the ones before it through remote state.
   # bootstrap and ci are applied by hand, never here.
-  ROOTS: guardrails network data queue auth worker api
+  ROOTS: guardrails network data queue auth worker api web
 
 jobs:
   checks:
