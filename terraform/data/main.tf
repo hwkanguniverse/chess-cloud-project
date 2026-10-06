@@ -89,6 +89,11 @@ resource "aws_dynamodb_table" "games" {
     type = "S"
   }
 
+  attribute {
+    name = "archive"
+    type = "S"
+  }
+
   # No GSI on gameId, deliberately. Both lookup patterns are served by the
   # primary key alone; a GSI would be eventually consistent, so a status poll
   # immediately after submit could 404 on a game that exists.
@@ -123,13 +128,43 @@ resource "aws_dynamodb_table" "games" {
     non_key_attributes = ["evalDepth"]
   }
 
-  # In-flight OAuth link attempts (SK = OAUTH#<state>) carry an expiresAt and
-  # are swept by DynamoDB. This is what makes an abandoned link flow leave
-  # nothing behind: the user who starts a Lichess link and never returns has
-  # their pending state deleted rather than lingering as a half-written link.
-  # Deletion is free and asynchronous - within ~48h of expiry, not instantly -
-  # so the handlers must still treat an expired item as absent rather than
-  # trusting the sweep to have run.
+  # directory: every player-month, and nothing else - what GET /players lists.
+  # Until this existed that route Scanned the whole table for the month items
+  # scattered among the games: 203 months among 83,427 items on 30 Sep, so its
+  # 20-page safety limit stopped after two of the three players - missing
+  # hikaru, the largest - and the page said the list was incomplete. PHASE-3 planned this index and deferred it until
+  # the Scan could be watched failing; it has been.
+  #
+  # Keyed on `archive` ("2026-09") because every month item already carries it
+  # as a string and no other item does - checked across the whole table - so
+  # the index is sparse by construction and DynamoDB fills it from the
+  # existing months itself: no new attribute, no backfill. Months spread
+  # across ~200 archive values, so no hot key either. PK as the sort key keeps
+  # each entry unique. The route Scans the index - listing everything has no
+  # key to query by - but that now reads ~200 small entries, not the table.
+  #
+  # Eventually consistent is fine: a month finished a second ago may list as
+  # pending for a second.
+  global_secondary_index {
+    name = "directory"
+    key_schema {
+      attribute_name = "archive"
+      key_type       = "HASH"
+    }
+    key_schema {
+      attribute_name = "PK"
+      key_type       = "RANGE"
+    }
+    projection_type    = "INCLUDE"
+    non_key_attributes = ["status", "summary", "analysedAt"]
+  }
+
+  # Short-lived control items carry an expiresAt and are swept by DynamoDB:
+  # rate-limit buckets, per-player analyse claims and the daily game cap. It
+  # was added for in-flight OAuth link attempts, removed with account linking
+  # on 30 Sep 2026. Deletion is free and asynchronous - within ~48h of expiry,
+  # not instantly - so the handlers must still treat an expired item as absent
+  # rather than trusting the sweep to have run.
   ttl {
     attribute_name = "expiresAt"
     enabled        = true

@@ -1,13 +1,20 @@
 # Web: where the browser app is served from - chess.hoowenkang.com.
 #
-# A private S3 bucket behind CloudFront, with a certificate and DNS in the
-# zone Route 53 created when the domain was registered. Decided in Phase F
+# A private S3 bucket behind CloudFront, with a certificate and DNS in a
+# Route 53 zone this root manages. Decided in Phase F
 # (see PHASE-F.md, "Hosting"): S3 website hosting alone is HTTP-only, and a
 # login flow needs HTTPS on a real origin.
 #
 # The files themselves are not Terraform's: the apply workflow builds the app
 # and syncs it here after this root is applied. Terraform owns the place, CI
 # owns the contents - the same split as the worker image and its ECR repo.
+#
+# The domain is registered at Porkbun, not Route 53 - this account's Route 53
+# registration was refused ("We can't finish registering your domain") and the
+# support case went unanswered. See the Deviations table in CLAUDE.md. The
+# registrar only holds the name and points it here; every record lives in the
+# zone below. The one manual link: Porkbun's nameservers for the domain must be
+# this zone's name_servers output. Terraform cannot see that setting.
 
 terraform {
   required_version = ">= 1.10"
@@ -62,9 +69,9 @@ variable "region" {
 
 variable "domain_name" {
   description = <<-EOT
-    The registered domain. Registered by hand in Route 53, which created its
-    hosted zone - so the zone is read here, not managed: a registration is a
-    purchase in a person's name, not infrastructure to rebuild from code.
+    The registered domain. Registered by hand at Porkbun - a registration is a
+    purchase in a person's name, not infrastructure to rebuild from code - and
+    delegated to the zone below.
   EOT
   type        = string
   default     = "hoowenkang.com"
@@ -83,8 +90,16 @@ locals {
   app_domain = "${var.app_subdomain}.${var.domain_name}"
 }
 
-data "aws_route53_zone" "main" {
-  name = var.domain_name
+# $0.50/month. Recreating it would assign four new nameservers, and the domain
+# would stop resolving until Porkbun was updated by hand - so Terraform refuses
+# to destroy it rather than let a plan replace it quietly.
+resource "aws_route53_zone" "site" {
+  name    = var.domain_name
+  comment = "chess-cloud frontend. Delegated from Porkbun."
+
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 
 # --- Bucket --------------------------------------------------------------------
@@ -147,7 +162,7 @@ resource "aws_route53_record" "cert_validation" {
     for o in aws_acm_certificate.site.domain_validation_options : o.domain_name => o
   }
 
-  zone_id = data.aws_route53_zone.main.zone_id
+  zone_id = aws_route53_zone.site.zone_id
   name    = each.value.resource_record_name
   type    = each.value.resource_record_type
   records = [each.value.resource_record_value]
@@ -225,7 +240,7 @@ resource "aws_cloudfront_distribution" "site" {
 resource "aws_route53_record" "site" {
   for_each = toset(["A", "AAAA"])
 
-  zone_id = data.aws_route53_zone.main.zone_id
+  zone_id = aws_route53_zone.site.zone_id
   name    = local.app_domain
   type    = each.value
 
@@ -237,6 +252,15 @@ resource "aws_route53_record" "site" {
 }
 
 # --- Outputs ---------------------------------------------------------------------
+
+# The four Porkbun points at.
+output "name_servers" {
+  value = aws_route53_zone.site.name_servers
+}
+
+output "zone_id" {
+  value = aws_route53_zone.site.zone_id
+}
 
 output "bucket" {
   value = aws_s3_bucket.site.bucket

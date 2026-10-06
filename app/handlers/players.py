@@ -2,20 +2,20 @@
 
 This is the one read in the project with no partition key behind it. Every
 other route starts from a player the caller already named - "list all players"
-does not, so DynamoDB cannot answer it from the primary key and this Scan
-reads the whole table.
+does not, so there is no key to query by, and it Scans.
 
-That is a deliberate, temporary choice. At the current size (tens of players,
-a few thousand items) a Scan is a handful of RCUs and costs nothing measurable.
-It does not stay true: a Scan reads every item to find the few that match, so
-its cost grows with total games ingested rather than with the number of
-players - one busy player adds ~200 archive items that this route must read
-and discard on every single call.
+It used to Scan the *table*, which PHASE-3 accepted as temporary: a Scan reads
+every item to find the few that match, so its cost grew with games ingested,
+not with players. Once games became their own items that stopped being
+theoretical - on 30 Sep the table held 203 month items among 83,427, the
+20-page limit below stopped after two of the three players, and the page said
+the list was incomplete. The one missing was hikaru, with 70,344 games. On the
+index the same listing is one page, 9 read units, all three.
 
-The replacement is a GSI keyed for listing, and it is planned rather than
-hypothetical - see the decision log in PHASE-3.md. It was deferred so the
-directory could be watched working (and watched getting slower) before the
-index was added, rather than the index being asserted up front.
+Now it Scans the `directory` index instead: every month item and nothing
+else (see terraform/data), so the read is ~200 small entries however many
+games exist. The deferral PHASE-3 chose - watch the Scan fail before adding
+the index - is what happened.
 
 Unauthenticated, like the other read routes: analysis is public shared data.
 """
@@ -25,15 +25,15 @@ import os
 from decimal import Decimal
 
 import boto3
-from boto3.dynamodb.conditions import Attr
 
 TABLE_NAME = os.environ["TABLE_NAME"]
 
 table = boto3.resource("dynamodb").Table(TABLE_NAME)
 
-# A safety valve, not a feature. If the table ever grows past this the route
-# returns a partial list rather than paging forever inside a user-facing
-# request - and `truncated` in the response says so out loud, because the
+# A safety valve, not a feature. On the index a page is ~1 MB of ~100-byte
+# month entries, so this is roughly 200,000 player-months before it trips. If
+# it ever does, the route returns a partial list rather than paging forever
+# inside a user-facing request - and `truncated` says so out loud, because the
 # player-route bug this project already hit was a *silent* truncation.
 MAX_PAGES = 20
 
@@ -53,20 +53,12 @@ def _response(status, body):
 
 
 def handler(event, context):
-    # Projection matters more here than anywhere else in the project. Without
-    # it the Scan pulls back every games array in the table - 145KB per heavy
-    # month - to build a list that shows none of them. With it, DynamoDB still
-    # *reads* the full items (a Scan's RCU cost is charged on what it reads,
-    # not what it returns), but the response stays small and the Lambda is not
-    # deserialising megabytes of JSON it will throw away.
+    # The index holds month items only, so there is nothing to filter out -
+    # the old table Scan needed a FilterExpression to drop the games, and still
+    # paid to read every one of them first.
     scan = {
+        "IndexName": "directory",
         "ProjectionExpression": "PK, #a, #s, summary.games, analysedAt",
-        # Months only. Games are their own items now, and a Scan sees every
-        # item in the table - without this the month count becomes the game
-        # count, which for a 129,391-game player is off by three orders of
-        # magnitude. Filtered server-side so the games are not shipped back
-        # here just to be discarded.
-        "FilterExpression": Attr("SK").begins_with("ARCHIVE#"),
         "ExpressionAttributeNames": {"#a": "archive", "#s": "status"},
     }
 
@@ -85,8 +77,8 @@ def handler(event, context):
         for item in result.get("Items", []):
             key = item.get("PK", "")
             if not key.startswith("PLAYER#"):
-                # OAUTH# state and USER# link items share the table. The
-                # directory is players only.
+                # Defensive: only month items carry `archive`, and they all
+                # live under PLAYER#. Anything else is not a player.
                 continue
 
             parts = key.split("#")

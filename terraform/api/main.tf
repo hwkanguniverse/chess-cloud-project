@@ -305,13 +305,6 @@ data "archive_file" "status" {
   output_file_mode = "0644"
 }
 
-data "archive_file" "link" {
-  type             = "zip"
-  source_file      = "${local.handlers_dir}/link.py"
-  output_path      = "${path.module}/build/link.zip"
-  output_file_mode = "0644"
-}
-
 data "archive_file" "player" {
   type             = "zip"
   source_file      = "${local.handlers_dir}/player.py"
@@ -338,11 +331,6 @@ resource "aws_cloudwatch_log_group" "analyse" {
 
 resource "aws_cloudwatch_log_group" "submit" {
   name              = "/aws/lambda/chess-cloud-submit"
-  retention_in_days = 14
-}
-
-resource "aws_cloudwatch_log_group" "link" {
-  name              = "/aws/lambda/chess-cloud-link"
   retention_in_days = 14
 }
 
@@ -500,43 +488,6 @@ resource "aws_iam_role_policy" "submit" {
   })
 }
 
-resource "aws_iam_role" "link" {
-  name               = "chess-cloud-link"
-  assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
-}
-
-resource "aws_iam_role_policy" "link" {
-  name = "link"
-  role = aws_iam_role.link.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        # PutItem writes both the link and the pending OAuth state; GetItem and
-        # Query read them back; DeleteItem consumes the state so a callback
-        # cannot be replayed. Scan is here only for the state lookup, which has
-        # no key other than the unguessable state value - see link.py.
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:Query",
-          "dynamodb:Scan",
-          "dynamodb:DeleteItem",
-        ]
-        Resource = local.table_arn
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["logs:CreateLogStream", "logs:PutLogEvents"]
-        Resource = "${aws_cloudwatch_log_group.link.arn}:*"
-      },
-      local.xray_write,
-    ]
-  })
-}
-
 resource "aws_iam_role" "player" {
   name               = "chess-cloud-player"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume.json
@@ -584,17 +535,13 @@ resource "aws_iam_role_policy" "players" {
     Statement = [
       {
         Effect = "Allow"
-        # Scan, and the only route in the project that gets it. "List all
-        # players" has no partition key, so the primary key cannot answer it -
-        # this reads the whole table and discards most of what it reads.
-        #
-        # Granted knowingly and temporarily. The cost of a Scan grows with
-        # total items rather than with the number of players, so one busy
-        # account adds ~200 archive items that this route must read on every
-        # call. The fix is a GSI keyed for listing, at which point this becomes
-        # Query and the permission goes back to matching every other read role.
+        # Scan, and the only route in the project that gets it: "list all
+        # players" has no key to query by. Scoped to the directory index, which
+        # holds month items only, so it can no longer read the whole table.
+        # Until 30 Sep it Scanned the table itself; that grant was removed a PR
+        # after the index one was added, per the Phase 4 rule.
         Action   = ["dynamodb:Scan"]
-        Resource = local.table_arn
+        Resource = "${local.table_arn}/index/directory"
       },
       {
         Effect   = "Allow"
@@ -721,43 +668,6 @@ resource "aws_lambda_function" "submit" {
   # Without this, a cold start racing the first log write could auto-create
   # the group before Terraform does, with retention set to "never expire".
   depends_on = [aws_cloudwatch_log_group.submit]
-}
-
-resource "aws_lambda_function" "link" {
-  function_name = "chess-cloud-link"
-  role          = aws_iam_role.link.arn
-
-  filename         = data.archive_file.link.output_path
-  source_code_hash = data.archive_file.link.output_base64sha256
-
-  runtime = "python3.13"
-  handler = "link.handler"
-
-  logging_config {
-    log_format            = "JSON"
-    application_log_level = "INFO"
-    system_log_level      = "INFO"
-  }
-  tracing_config {
-    mode = "Active"
-  }
-  # Longer than the others: this one makes two outbound calls to lichess.org
-  # (token exchange, then account lookup) and a slow upstream should fail the
-  # request rather than the function.
-  timeout = 20
-
-  environment {
-    variables = {
-      TABLE_NAME = local.table_name
-      # The redirect_uri must match byte-for-byte between the authorize request
-      # and the token exchange, so it is derived from one value. invoke_url
-      # carries a trailing slash; strip it or every URL built from this gets a
-      # doubled separator, which OAuth compares as a different URI.
-      API_BASE = trimsuffix(aws_apigatewayv2_stage.default.invoke_url, "/")
-    }
-  }
-
-  depends_on = [aws_cloudwatch_log_group.link]
 }
 
 resource "aws_lambda_function" "player" {
@@ -1022,63 +932,6 @@ resource "aws_apigatewayv2_route" "players" {
   target    = "integrations/${aws_apigatewayv2_integration.players.id}"
 }
 
-resource "aws_apigatewayv2_integration" "link" {
-  api_id                 = aws_apigatewayv2_api.api.id
-  integration_type       = "AWS_PROXY"
-  integration_uri        = aws_lambda_function.link.invoke_arn
-  payload_format_version = "2.0"
-}
-
-resource "aws_apigatewayv2_route" "link_lichess_start" {
-  api_id    = aws_apigatewayv2_api.api.id
-  route_key = "POST /link/lichess"
-  target    = "integrations/${aws_apigatewayv2_integration.link.id}"
-
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
-}
-
-# Deliberately unauthenticated, and the only route that is. Lichess redirects
-# the user's *browser* here after they approve, and a redirect carries no
-# Authorization header - there is no way for the caller to present a token.
-#
-# What stands in for it: the `state` parameter. It is 32 bytes of entropy that
-# this API generated and stored against the user's own partition moments
-# earlier, so possessing a valid one is itself the proof of who is returning.
-# The item is single-use (deleted on success) and expires in 10 minutes, so a
-# leaked state is neither replayable nor durable.
-resource "aws_apigatewayv2_route" "link_lichess_callback" {
-  api_id    = aws_apigatewayv2_api.api.id
-  route_key = "GET /link/lichess/callback"
-  target    = "integrations/${aws_apigatewayv2_integration.link.id}"
-}
-
-resource "aws_apigatewayv2_route" "link_chesscom" {
-  api_id    = aws_apigatewayv2_api.api.id
-  route_key = "POST /link/chesscom"
-  target    = "integrations/${aws_apigatewayv2_integration.link.id}"
-
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
-}
-
-resource "aws_apigatewayv2_route" "links_list" {
-  api_id    = aws_apigatewayv2_api.api.id
-  route_key = "GET /links"
-  target    = "integrations/${aws_apigatewayv2_integration.link.id}"
-
-  authorization_type = "JWT"
-  authorizer_id      = aws_apigatewayv2_authorizer.jwt.id
-}
-
-resource "aws_lambda_permission" "link" {
-  statement_id  = "AllowAPIGatewayInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.link.function_name
-  principal     = "apigateway.amazonaws.com"
-  source_arn    = "${aws_apigatewayv2_api.api.execution_arn}/*/*"
-}
-
 resource "aws_apigatewayv2_stage" "default" {
   api_id      = aws_apigatewayv2_api.api.id
   name        = "$default"
@@ -1156,8 +1009,8 @@ resource "aws_lambda_permission" "players" {
 # crash's report says `status: success`. Hence all three terms.
 #
 # Counts unhandled exceptions and timeouts. Deliberately not counted: the
-# handled 502/503s that submit and link return when Chess.com or Lichess is
-# down - an upstream outage is not something to act on at 2am.
+# handled 502/503s that submit returns when Chess.com is down - an upstream
+# outage is not something to act on at 2am.
 resource "aws_cloudwatch_metric_alarm" "lambda_errors" {
   alarm_name          = "chess-cloud-lambda-errors"
   alarm_description   = "A Lambda crashed or timed out. Find which - Logs Insights over /aws/lambda/chess-cloud-*: filter log_level = 'ERROR' or level = 'ERROR' or record.status in ['timeout', 'error', 'failure']"

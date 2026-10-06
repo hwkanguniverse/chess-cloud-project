@@ -34,7 +34,7 @@ table = boto3.resource("dynamodb").Table(TABLE_NAME)
 
 # platform/username/yyyy-mm - the three fields that name one unit of analysis.
 ANALYSIS_ID_RE = re.compile(
-    r"^(chesscom|lichess)/([a-z0-9_-]{1,50})/(\d{4}-(?:0[1-9]|1[0-2]))$"
+    r"^(chesscom)/([a-z0-9_-]{1,50})/(\d{4}-(?:0[1-9]|1[0-2]))$"
 )
 
 
