@@ -12,8 +12,9 @@
  */
 import { Link, Route, Routes } from "react-router-dom";
 
+import Analyse from "./screens/Analyse";
 import Directory from "./screens/Directory";
-import Home from "./screens/Home";
+import Landing from "./screens/Landing";
 import Player from "./screens/Player";
 import UserMenu from "./components/UserMenu";
 
@@ -26,14 +27,15 @@ export default function App() {
         </Link>
         <nav>
           <Link to="/players">Players</Link>
-          <Link to="/">Analyse</Link>
+          <Link to="/analyse">Analyse</Link>
         </nav>
         <UserMenu />
       </header>
 
       <main>
         <Routes>
-          <Route path="/" element={<Home />} />
+          <Route path="/" element={<Landing />} />
+          <Route path="/analyse" element={<Analyse />} />
           <Route path="/players" element={<Directory />} />
           <Route path="/player/:platform/:username" element={<Player />} />
           <Route path="*" element={<p className="empty">Nothing here.</p>} />

@@ -1,9 +1,12 @@
 /**
- * Home: submit a player.
+ * Analyse: submit a player.
  *
  * The one screen behind <Authenticator>, because POST /games is the one route
  * behind the JWT authorizer. Amplify UI renders sign-in, sign-up, email
  * confirmation and password reset from that single element.
+ *
+ * It lives at /analyse rather than / so that a first visit lands on the public
+ * landing page, not on a sign-in form for an app it has not yet explained.
  */
 import { useState, type FormEvent } from "react";
 import { Authenticator } from "@aws-amplify/ui-react";
@@ -103,7 +106,7 @@ function SubmitForm() {
   );
 }
 
-export default function Home() {
+export default function Analyse() {
   return (
     <Authenticator signUpAttributes={["email"]}>
       {() => <SubmitForm />}

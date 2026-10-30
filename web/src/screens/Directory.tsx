@@ -9,15 +9,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
 import { listPlayers, type DirectoryEntry } from "../api";
-
-function ago(seconds: number | null): string {
-  if (!seconds) return "—";
-  const delta = Date.now() / 1000 - seconds;
-  if (delta < 60) return "just now";
-  if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
-  if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
-  return `${Math.floor(delta / 86400)}d ago`;
-}
+import { ago } from "../format";
 
 export default function Directory() {
   const [players, setPlayers] = useState<DirectoryEntry[] | null>(null);
@@ -47,7 +39,7 @@ export default function Directory() {
   if (players.length === 0) {
     return (
       <p className="empty">
-        Nobody has been analysed yet. <Link to="/">Be the first.</Link>
+        Nobody has been analysed yet. <Link to="/analyse">Be the first.</Link>
       </p>
     );
   }

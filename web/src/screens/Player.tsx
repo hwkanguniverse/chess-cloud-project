@@ -268,7 +268,7 @@ export default function Player() {
   if (notFound) {
     return (
       <p className="empty">
-        Not analysed yet. <Link to="/">Submit {username}</Link> to start.
+        Not analysed yet. <Link to="/analyse">Submit {username}</Link> to start.
       </p>
     );
   }
